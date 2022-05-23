@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 
 ### DEBUG
-    FP="-fno-omit-frame-pointer" # enable for profiling/debugging
-    BK_DEBUG="-DBK_DEBUG"
-    DEBUG="-g ${FP} -DBK_DEBUG"
+#     FP="-fno-omit-frame-pointer" # enable for profiling/debugging
+#     BK_DEBUG="-DBK_DEBUG"
+#     DEBUG="-g ${FP} -DBK_DEBUG"
 
 ### OPT
-#     LTO="-flto"
-#     MARCHTUNE="-march=native -mtune=native"
-#     LEVEL="-O3"
-    LEVEL="-O0"
+    LTO="-flto"
+    MARCHTUNE="-march=native -mtune=native"
+    LEVEL="-O3"
+#     LEVEL="-O0"
 
     OPT="${LEVEL} ${MARCHTUNE} ${LTO}"
 

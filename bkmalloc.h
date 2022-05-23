@@ -499,11 +499,13 @@ static inline void * bk_get_aligned_pages(u64 n_pages, u64 alignment) {
 #define BK_PR_BG_YELLOW  "\e[43m"
 #define BK_PR_BG_MAGENTA "\e[45m"
 
-#define BK_PUTC(_c)  \
-do {                 \
-    char c;          \
-    c = (_c);        \
-    write(1, &c, 1); \
+#define BK_PUTC(_c)        \
+do {                       \
+    char c;                \
+    int  x;                \
+    c = (_c);              \
+    x = write(1, &c, 1);   \
+    (void)x;               \
 } while (0)
 
 static void bk_puts(const char *s) {
