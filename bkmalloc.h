@@ -992,7 +992,7 @@ static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
     /* Ask for memory twice the desired size so that we can get aligned memory. */
     request_size = MAX(n_bytes, alignment) << 1ULL;
 
-    block = bk_make_block(heap, BK_BIG_ALLOC_SIZE_CLASS_IDX, request_size);
+    block = bk_make_block(heap, BK_BIG_ALLOC_SIZE_CLASS_IDX, MAX(request_size, BK_BLOCK_SIZE));
 
     mem_start = block->_chunk_space;
 
