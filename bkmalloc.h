@@ -206,10 +206,16 @@ void operator delete[](void* ptr, std::size_t size, std::align_val_t alignment) 
 #include <stdint.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h> /* memcpy(), memset() */
 
+/* Stuff from stdlib.h, but I don't want to include stdlib.h */
+char *getenv(const char *name);
+void  exit(int status);
+
+
+
 #define MIN_ALIGN                   (16ULL)
-#define THREAD_MAX_ALLOC_SIZE       (KB(16) - 1)
 #define BK_BLOCK_SIZE               (MB(1))
 #define BK_BLOCK_ALIGN              (MB(1))
 #define BK_BASE_SIZE_CLASS          (MIN_ALIGN)
@@ -248,6 +254,8 @@ static inline void bk_init(void);
 #define BK_ALWAYS_INLINE __attribute__((always_inline))
 #endif /* BK_DEBUG */
 
+#define HOT __attribute__((hot))
+
 #define GLOBAL_ALIGN(_a) __attribute__((aligned((_a))))
 #define FIELD_ALIGN(_a)  __attribute__((aligned((_a))))
 #define PACKED           __attribute__((packed))
@@ -285,6 +293,7 @@ static inline void bk_init(void);
 #define TB(x) ((x) * 1024ULL * GB(1ULL))
 
 #define CAS(_ptr, _old, _new) (__sync_bool_compare_and_swap((_ptr), (_old), (_new)))
+#define FAA(_ptr, _val)       (__sync_fetch_and_add((_ptr), (_val)))
 #define CLZ(_val)             (__builtin_clzll((_val) | 1ULL))
 #define CTZ(_val)             (__builtin_ctzll((_val) | 1ULL))
 
@@ -292,7 +301,22 @@ static inline void bk_init(void);
 #define PAGE_SIZE      (4096ULL)
 #define LOG2_PAGE_SIZE (LOG2_64BIT(PAGE_SIZE))
 
-static void bk_printf(const char *fmt, ...);
+
+static inline int bk_is_space(int c) {
+    unsigned char d = c - 9;
+    return (0x80001FU >> (d & 31)) & (1U >> (d >> 5));
+}
+
+static void bk_fdprintf(int fd, const char *fmt, ...);
+
+#define bk_printf(...) (bk_fdprintf(1, __VA_ARGS__))
+#define bk_logf(...)                                 \
+do {                                                 \
+    if (bk_config._log_fd != 0) {                    \
+        bk_fdprintf(bk_config._log_fd, __VA_ARGS__); \
+    }                                                \
+} while (0)
+
 
 #ifdef BK_DO_ASSERTIONS
 static void bk_assert_fail(const char *msg, const char *fname, int line, const char *cond_str) {
@@ -317,12 +341,17 @@ do { if (unlikely(!(cond))) {                       \
 #define BK_ASSERT(cond, mst) ;
 #endif
 
+static void *bk_imalloc(u64 n_bytes);
+static void  bk_ifree(void *addr);
+static char *bk_istrdup(const char *s);
+
 /******************************* @@platform *******************************/
 #if defined(unix) || defined(__unix__) || defined(__unix) || defined(__linux__) || defined(__APPLE__)
     #define BK_UNIX
     #include <unistd.h>
     #include <errno.h>
     #include <sys/mman.h>
+    #include <fcntl.h>
 
     #if defined(__APPLE__)
         #define BK_APPLE
@@ -480,6 +509,21 @@ static inline void * bk_get_aligned_pages(u64 n_pages, u64 alignment) {
     return aligned_start;
 }
 
+/******************************* @@locks *******************************/
+
+typedef struct {
+    s32 val;
+} bk_Spinlock;
+
+#define BK_SPIN_UNLOCKED (0)
+#define BK_SPIN_LOCKED   (1)
+#define BK_STATIC_SPIN_LOCK_INIT ((bk_Spinlock){ BK_SPIN_UNLOCKED })
+
+BK_ALWAYS_INLINE static inline void bk_spin_init(bk_Spinlock *spin)   { spin->val = BK_SPIN_UNLOCKED;   }
+BK_ALWAYS_INLINE static inline void bk_spin_lock(bk_Spinlock *spin)   { while (!CAS(&spin->val, 0, 1)); }
+BK_ALWAYS_INLINE static inline void bk_spin_unlock(bk_Spinlock *spin) { (void)CAS(&spin->val, 1, 0);    }
+
+
 
 /******************************* @@printf *******************************/
 
@@ -499,17 +543,17 @@ static inline void * bk_get_aligned_pages(u64 n_pages, u64 alignment) {
 #define BK_PR_BG_YELLOW  "\e[43m"
 #define BK_PR_BG_MAGENTA "\e[45m"
 
-#define BK_PUTC(_c)        \
+#define BK_PUTC(fd, _c)    \
 do {                       \
     char c;                \
     int  x;                \
     c = (_c);              \
-    x = write(1, &c, 1);   \
+    x = write((fd), &c, 1);\
     (void)x;               \
 } while (0)
 
-static void bk_puts(const char *s) {
-    while (*s) { BK_PUTC(*s); s += 1; }
+static void bk_puts(int fd, const char *s) {
+    while (*s) { BK_PUTC(fd, *s); s += 1; }
 }
 
 static char * bk_atos(char *p, char c) {
@@ -614,7 +658,7 @@ static char * bk_Xtos(char *p, u64 x) {
     return p;
 }
 
-static const char * bk_eat_pad(const char *s, int *pad) {
+static const char * bk_eat_pad(const char *s, int *pad, va_list *argsp) {
     int neg;
 
     if (!*s) { return s; }
@@ -625,9 +669,14 @@ static const char * bk_eat_pad(const char *s, int *pad) {
 
     if (neg || *s == '0') { s += 1; }
 
-    while (*s >= '0' && *s <= '9') {
-        *pad = 10 * *pad + (*s - '0');
+    if (*s == '*') {
+        *pad = va_arg(*argsp, s32);
         s += 1;
+    } else {
+        while (*s >= '0' && *s <= '9') {
+            *pad = 10 * *pad + (*s - '0');
+            s += 1;
+        }
     }
 
     if (neg) { *pad = -*pad; }
@@ -635,14 +684,21 @@ static const char * bk_eat_pad(const char *s, int *pad) {
     return s;
 }
 
-void bk_vprintf(const char *fmt, va_list args) {
-    int   last_was_perc;
-    char  c;
-    int   pad;
-    int   padz;
-    char  buff[64];
+static bk_Spinlock bk_printf_lock;
+
+void bk_vprintf(int fd, const char *fmt, va_list _args) {
+    va_list     args;
+    int         last_was_perc;
+    char        c;
+    int         pad;
+    int         padz;
+    char        buff[64];
     const char *p;
-    int   p_len;
+    int         p_len;
+
+    bk_spin_lock(&bk_printf_lock);
+
+    va_copy(args, _args);
 
     last_was_perc = 0;
 
@@ -657,7 +713,7 @@ void bk_vprintf(const char *fmt, va_list args) {
 
             if (c == '-' || c == '0' || (c >= '1' && c <= '9')) {
                 padz = c == '0';
-                fmt = bk_eat_pad(fmt, &pad);
+                fmt = bk_eat_pad(fmt, &pad, &args);
                 c = *fmt;
             }
 
@@ -692,44 +748,1251 @@ void bk_vprintf(const char *fmt, va_list args) {
 
             for (p_len = 0; p[p_len]; p_len += 1);
 
-            for (; pad - p_len > 0; pad -= 1) { BK_PUTC(padz ? '0' : ' '); }
+            for (; pad - p_len > 0; pad -= 1) { BK_PUTC(fd, padz ? '0' : ' '); }
 
-            bk_puts(p);
+            bk_puts(fd, p);
 
-            for (; pad + p_len < 0; pad += 1) { BK_PUTC(padz ? '0' : ' '); }
+            for (; pad + p_len < 0; pad += 1) { BK_PUTC(fd, padz ? '0' : ' '); }
 
 noprint:;
             last_was_perc = 0;
         } else {
-            BK_PUTC(*fmt);
+            BK_PUTC(fd, *fmt);
         }
 
 next:;
         fmt += 1;
     }
+
+    va_end(args);
+
+    bk_spin_unlock(&bk_printf_lock);
 }
 
-void bk_printf(const char *fmt, ...) {
+static void bk_fdprintf(int fd, const char *fmt, ...) {
     va_list args;
 
     va_start(args, fmt);
-    bk_vprintf(fmt, args);
+    bk_vprintf(fd, fmt, args);
     va_end(args);
 }
 
-/******************************* @@locks *******************************/
+/******************************* @@config *******************************/
+
+#define BK_SCFG_ERR_NONE          (0)
+#define BK_SCFG_ERR_BAD_FILE      (1)
+#define BK_SCFG_ERR_BAD_SYNTAX    (2)
+#define BK_SCFG_ERR_BAD_KEY       (3)
+#define BK_SCFG_ERR_BAD_VAL       (4)
+#define BK_SCFG_ERR_VALIDATE      (5)
+
+#define BK_SCFG_KIND_BOOL         (1)
+#define BK_SCFG_KIND_INT          (2)
+#define BK_SCFG_KIND_FLOAT        (3)
+#define BK_SCFG_KIND_STRING       (4)
+
+#define BK_SCFG_ENTRY_REQUIRED    (0x1)
+#define BK_SCFG_ENTRY_HAS_DEFAULT (0x2)
+#define BK_SCFG_ENTRY_SET         (0x4)
+
+struct bk_scfg;
+
+typedef int (*bk_scfg_validate_bool_fn_t)  (struct bk_scfg*, int);
+typedef int (*bk_scfg_validate_int_fn_t)   (struct bk_scfg*, int);
+typedef int (*bk_scfg_validate_float_fn_t) (struct bk_scfg*, float);
+typedef int (*bk_scfg_validate_string_fn_t)(struct bk_scfg*, const char*);
 
 typedef struct {
-    s32 val;
-} bk_Spinlock;
+    u32 kind;
+    u32 flags;
+    union {
+        u32         *baddr;
+        s32         *iaddr;
+        float       *faddr;
+        const char **saddr;
+        void        *_addr;
+    };
+    union {
+        u32         bdef;
+        s32         idef;
+        float       fdef;
+        const char *sdef;
+    };
+    void *validate;
+} bk_scfg_entry_t;
 
-#define BK_SPIN_UNLOCKED (0)
-#define BK_SPIN_LOCKED   (1)
-#define BK_STATIC_SPIN_LOCK_INIT ((bk_Spinlock){ BK_SPIN_UNLOCKED })
+static void bk_scfg_entry_free(bk_scfg_entry_t *entry) {
+    if (entry->kind == BK_SCFG_KIND_STRING) {
+        if (entry->sdef != NULL) {
+            free((void*)entry->sdef);
+        }
+    }
+}
 
-BK_ALWAYS_INLINE static inline void bk_spin_init(bk_Spinlock *spin)   { spin->val = BK_SPIN_UNLOCKED;   }
-BK_ALWAYS_INLINE static inline void bk_spin_lock(bk_Spinlock *spin)   { while (!CAS(&spin->val, 0, 1)); }
-BK_ALWAYS_INLINE static inline void bk_spin_unlock(bk_Spinlock *spin) { (void)CAS(&spin->val, 1, 0);    }
+typedef const char *bk_scfg_str;
+
+/*********************************************************************
+    BEGIN HASH TABLE
+
+    You can ignore this part.
+    Generated by running github.com/kammerdienerb/hash_table.h through
+    the preprocessor.
+**********************************************************************/
+static uint64_t ht_prime_sizes[] = {
+                             5ULL,
+                             11ULL,
+                             23ULL,
+                             47ULL,
+                             97ULL,
+                             199ULL,
+                             409ULL,
+                             823ULL,
+                             1741ULL,
+                             3469ULL,
+                             6949ULL,
+                             14033ULL,
+                             28411ULL,
+                             57557ULL,
+                             116731ULL,
+                             236897ULL,
+                             480881ULL,
+                             976369ULL,
+                             1982627ULL,
+                             4026031ULL,
+                             8175383ULL,
+                             16601593ULL,
+                             33712729ULL,
+                             68460391ULL,
+                             139022417ULL,
+                             282312799ULL,
+                             573292817ULL,
+                             1164186217ULL,
+                             2364114217ULL,
+                             4294967291ULL,
+                             8589934583ULL,
+                             17179869143ULL,
+                             34359738337ULL,
+                             68719476731ULL,
+                             137438953447ULL,
+                             274877906899ULL,
+                             549755813881ULL,
+                             1099511627689ULL,
+                             2199023255531ULL,
+                             4398046511093ULL,
+                             8796093022151ULL,
+                             17592186044399ULL,
+                             35184372088777ULL,
+                             70368744177643ULL,
+                             140737488355213ULL,
+                             281474976710597ULL,
+                             562949953421231ULL,
+                             1125899906842597ULL,
+                             2251799813685119ULL,
+                             4503599627370449ULL,
+                             9007199254740881ULL,
+                             18014398509481951ULL,
+                             36028797018963913ULL,
+                             72057594037927931ULL,
+                             144115188075855859ULL,
+                             288230376151711717ULL,
+                             576460752303423433ULL,
+                             1152921504606846883ULL,
+                             2305843009213693951ULL,
+                             4611686018427387847ULL,
+                             9223372036854775783ULL,
+                             18446744073709551557ULL};
+struct _hash_table_bk_scfg_str_bk_scfg_entry_t;
+typedef struct _hash_table_slot_bk_scfg_str_bk_scfg_entry_t {
+    bk_scfg_str _key;
+    bk_scfg_entry_t _val;
+    uint64_t _hash;
+    struct _hash_table_slot_bk_scfg_str_bk_scfg_entry_t * _next;
+} * hash_table_slot_bk_scfg_str_bk_scfg_entry_t;
+typedef void (*hash_table_bk_scfg_str_bk_scfg_entry_t_free_t)(
+    struct _hash_table_bk_scfg_str_bk_scfg_entry_t *);
+typedef bk_scfg_str * (*hash_table_bk_scfg_str_bk_scfg_entry_t_get_key_t)(
+    struct _hash_table_bk_scfg_str_bk_scfg_entry_t *, bk_scfg_str);
+typedef bk_scfg_entry_t * (*hash_table_bk_scfg_str_bk_scfg_entry_t_get_val_t)(
+    struct _hash_table_bk_scfg_str_bk_scfg_entry_t *, bk_scfg_str);
+typedef void (*hash_table_bk_scfg_str_bk_scfg_entry_t_insert_t)(
+    struct _hash_table_bk_scfg_str_bk_scfg_entry_t *, bk_scfg_str, bk_scfg_entry_t);
+typedef int (*hash_table_bk_scfg_str_bk_scfg_entry_t_delete_t)(
+    struct _hash_table_bk_scfg_str_bk_scfg_entry_t *, bk_scfg_str);
+typedef uint64_t (*hash_table_bk_scfg_str_bk_scfg_entry_t_hash_t)(bk_scfg_str);
+typedef int (*hash_table_bk_scfg_str_bk_scfg_entry_t_equ_t)(bk_scfg_str, bk_scfg_str);
+typedef struct _hash_table_bk_scfg_str_bk_scfg_entry_t {
+    hash_table_slot_bk_scfg_str_bk_scfg_entry_t * _data;
+    uint64_t len, _size_idx, _load_thresh;
+    hash_table_bk_scfg_str_bk_scfg_entry_t_free_t const _free;
+    hash_table_bk_scfg_str_bk_scfg_entry_t_get_key_t const _get_key;
+    hash_table_bk_scfg_str_bk_scfg_entry_t_get_val_t const _get_val;
+    hash_table_bk_scfg_str_bk_scfg_entry_t_insert_t const _insert;
+    hash_table_bk_scfg_str_bk_scfg_entry_t_delete_t const _delete;
+    hash_table_bk_scfg_str_bk_scfg_entry_t_hash_t const _hash;
+    hash_table_bk_scfg_str_bk_scfg_entry_t_equ_t const _equ;
+} * hash_table_bk_scfg_str_bk_scfg_entry_t;
+static inline hash_table_slot_bk_scfg_str_bk_scfg_entry_t
+hash_table_slot_bk_scfg_str_bk_scfg_entry_t_make(bk_scfg_str key, bk_scfg_entry_t val,
+                                           uint64_t hash) {
+    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot =
+        (hash_table_slot_bk_scfg_str_bk_scfg_entry_t)bk_imalloc(sizeof(*slot));
+    slot->_key = key;
+    slot->_val = val;
+    slot->_hash = hash;
+    slot->_next = NULL;
+    return slot;
+}
+static inline void hash_table_bk_scfg_str_bk_scfg_entry_t_rehash_insert(
+    hash_table_bk_scfg_str_bk_scfg_entry_t t,
+    hash_table_slot_bk_scfg_str_bk_scfg_entry_t insert_slot) {
+    uint64_t h, data_size, idx;
+    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot, *slot_ptr;
+    h = insert_slot->_hash;
+    data_size = ht_prime_sizes[t->_size_idx];
+    idx = h % data_size;
+    slot_ptr = t->_data + idx;
+    while ((slot = *slot_ptr)) {
+        slot_ptr = &(slot->_next);
+    }
+    *slot_ptr = insert_slot;
+}
+static inline void hash_table_bk_scfg_str_bk_scfg_entry_t_update_load_thresh(
+    hash_table_bk_scfg_str_bk_scfg_entry_t t) {
+    uint64_t cur_size;
+    cur_size = ht_prime_sizes[t->_size_idx];
+    t->_load_thresh =
+        ((double)((cur_size << 1ULL)) / ((double)(cur_size * 3))) * cur_size;
+}
+static inline void
+hash_table_bk_scfg_str_bk_scfg_entry_t_rehash(hash_table_bk_scfg_str_bk_scfg_entry_t t) {
+    uint64_t old_size, new_data_size;
+    hash_table_slot_bk_scfg_str_bk_scfg_entry_t *old_data, slot, *slot_ptr, next;
+    old_size = ht_prime_sizes[t->_size_idx];
+    old_data = t->_data;
+    t->_size_idx += 1;
+    new_data_size = sizeof(hash_table_slot_bk_scfg_str_bk_scfg_entry_t) *
+                    ht_prime_sizes[t->_size_idx];
+    t->_data = (hash_table_slot_bk_scfg_str_bk_scfg_entry_t*)bk_imalloc(new_data_size);
+    memset(t->_data, 0, new_data_size);
+    for (uint64_t i = 0; i < old_size; i += 1) {
+        slot_ptr = old_data + i;
+        next = *slot_ptr;
+        while ((slot = next)) {
+            next = slot->_next;
+            slot->_next = NULL;
+            hash_table_bk_scfg_str_bk_scfg_entry_t_rehash_insert(t, slot);
+        }
+    }
+    bk_ifree(old_data);
+    hash_table_bk_scfg_str_bk_scfg_entry_t_update_load_thresh(t);
+}
+static inline void
+hash_table_bk_scfg_str_bk_scfg_entry_t_insert(hash_table_bk_scfg_str_bk_scfg_entry_t t,
+                                        bk_scfg_str key, bk_scfg_entry_t val) {
+    uint64_t h, data_size, idx;
+    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot, *slot_ptr;
+    h = t->_hash(key);
+    data_size = ht_prime_sizes[t->_size_idx];
+    idx = h % data_size;
+    slot_ptr = t->_data + idx;
+    while ((slot = *slot_ptr)) {
+        if (((t)->_equ ? (t)->_equ((slot->_key), (key))
+                       : (slot->_key) == (key))) {
+            slot->_val = val;
+            return;
+        }
+        slot_ptr = &(slot->_next);
+    }
+    *slot_ptr = hash_table_slot_bk_scfg_str_bk_scfg_entry_t_make(key, val, h);
+    t->len += 1;
+    if (t->len == t->_load_thresh) {
+        hash_table_bk_scfg_str_bk_scfg_entry_t_rehash(t);
+    }
+}
+static inline int
+hash_table_bk_scfg_str_bk_scfg_entry_t_delete(hash_table_bk_scfg_str_bk_scfg_entry_t t,
+                                        bk_scfg_str key) {
+    uint64_t h, data_size, idx;
+    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot, prev, *slot_ptr;
+    h = t->_hash(key);
+    data_size = ht_prime_sizes[t->_size_idx];
+    idx = h % data_size;
+    slot_ptr = t->_data + idx;
+    prev = NULL;
+    while ((slot = *slot_ptr)) {
+        if (((t)->_equ ? (t)->_equ((slot->_key), (key))
+                       : (slot->_key) == (key))) {
+            break;
+        }
+        prev = slot;
+        slot_ptr = &(slot->_next);
+    }
+    if ((slot = *slot_ptr)) {
+        if (prev) {
+            prev->_next = slot->_next;
+        } else {
+            *slot_ptr = slot->_next;
+        }
+        bk_ifree(slot);
+        t->len -= 1;
+        return 1;
+    }
+    return 0;
+}
+static inline bk_scfg_str *
+hash_table_bk_scfg_str_bk_scfg_entry_t_get_key(hash_table_bk_scfg_str_bk_scfg_entry_t t,
+                                         bk_scfg_str key) {
+    uint64_t h, data_size, idx;
+    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot, *slot_ptr;
+    h = t->_hash(key);
+    data_size = ht_prime_sizes[t->_size_idx];
+    idx = h % data_size;
+    slot_ptr = t->_data + idx;
+    while ((slot = *slot_ptr)) {
+        if (((t)->_equ ? (t)->_equ((slot->_key), (key))
+                       : (slot->_key) == (key))) {
+            return &slot->_key;
+        }
+        slot_ptr = &(slot->_next);
+    }
+    return NULL;
+}
+static inline bk_scfg_entry_t *
+hash_table_bk_scfg_str_bk_scfg_entry_t_get_val(hash_table_bk_scfg_str_bk_scfg_entry_t t,
+                                         bk_scfg_str key) {
+    uint64_t h, data_size, idx;
+    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot, *slot_ptr;
+    h = t->_hash(key);
+    data_size = ht_prime_sizes[t->_size_idx];
+    idx = h % data_size;
+    slot_ptr = t->_data + idx;
+    while ((slot = *slot_ptr)) {
+        if (((t)->_equ ? (t)->_equ((slot->_key), (key))
+                       : (slot->_key) == (key))) {
+            return &slot->_val;
+        }
+        slot_ptr = &(slot->_next);
+    }
+    return NULL;
+}
+static inline void
+hash_table_bk_scfg_str_bk_scfg_entry_t_free(hash_table_bk_scfg_str_bk_scfg_entry_t t) {
+    for (uint64_t i = 0; i < ht_prime_sizes[t->_size_idx]; i += 1) {
+        hash_table_slot_bk_scfg_str_bk_scfg_entry_t next, slot = t->_data[i];
+        while (slot != NULL) {
+            next = slot->_next;
+            bk_ifree(slot);
+            slot = next;
+        }
+    }
+    bk_ifree(t->_data);
+    bk_ifree(t);
+}
+static inline hash_table_bk_scfg_str_bk_scfg_entry_t
+hash_table_bk_scfg_str_bk_scfg_entry_t_make(
+    hash_table_bk_scfg_str_bk_scfg_entry_t_hash_t hash, void * equ) {
+    hash_table_bk_scfg_str_bk_scfg_entry_t t
+        = (hash_table_bk_scfg_str_bk_scfg_entry_t)bk_imalloc(sizeof(*t));
+    uint64_t data_size =
+        ht_prime_sizes[(3)] * sizeof(hash_table_slot_bk_scfg_str_bk_scfg_entry_t);
+    hash_table_slot_bk_scfg_str_bk_scfg_entry_t * the_data
+        = (hash_table_slot_bk_scfg_str_bk_scfg_entry_t*)bk_imalloc(data_size);
+    memset(the_data, 0, data_size);
+    struct _hash_table_bk_scfg_str_bk_scfg_entry_t init = {
+        ._data = the_data,
+        .len = 0,
+        ._size_idx = (3),
+        ._load_thresh = 0,
+        ._free = hash_table_bk_scfg_str_bk_scfg_entry_t_free,
+        ._get_key = hash_table_bk_scfg_str_bk_scfg_entry_t_get_key,
+        ._get_val = hash_table_bk_scfg_str_bk_scfg_entry_t_get_val,
+        ._insert = hash_table_bk_scfg_str_bk_scfg_entry_t_insert,
+        ._delete = hash_table_bk_scfg_str_bk_scfg_entry_t_delete,
+        ._hash = (hash_table_bk_scfg_str_bk_scfg_entry_t_hash_t)hash,
+        ._equ = (hash_table_bk_scfg_str_bk_scfg_entry_t_equ_t)equ};
+    memcpy((void*)t, (void*)&init, sizeof(*t));
+    hash_table_bk_scfg_str_bk_scfg_entry_t_update_load_thresh(t);
+    return t;
+};
+
+#define STR(x) _STR(x)
+#define _STR(x) #x
+
+#define CAT2(x, y) _CAT2(x, y)
+#define _CAT2(x, y) x##y
+
+#define CAT3(x, y, z) _CAT3(x, y, z)
+#define _CAT3(x, y, z) x##y##z
+
+#define CAT4(a, b, c, d) _CAT4(a, b, c, d)
+#define _CAT4(a, b, c, d) a##b##c##d
+
+#define hash_table(K_T, V_T) CAT4(hash_table_, K_T, _, V_T)
+
+#define hash_table_make(K_T, V_T, HASH) (CAT2(hash_table(K_T, V_T), _make)((HASH), NULL))
+#define hash_table_make_e(K_T, V_T, HASH, EQU) (CAT2(hash_table(K_T, V_T), _make)((HASH), (EQU)))
+#define hash_table_len(t) (t->len)
+#define hash_table_free(t) (t->_free((t)))
+#define hash_table_get_key(t, k) (t->_get_key((t), (k)))
+#define hash_table_get_val(t, k) (t->_get_val((t), (k)))
+#define hash_table_insert(t, k, v) (t->_insert((t), (k), (v)))
+#define hash_table_delete(t, k) (t->_delete((t), (k)))
+#define hash_table_traverse(t, key, val_ptr)                     \
+    for (/* vars */                                              \
+         uint64_t __i    = 0,                                    \
+                  __size = ht_prime_sizes[t->_size_idx];         \
+         /* conditions */                                        \
+         __i < __size;                                           \
+         /* increment */                                         \
+         __i += 1)                                               \
+        for (/* vars */                                          \
+             __typeof__(*t->_data) *__slot_ptr = t->_data + __i, \
+                                    __slot     = *__slot_ptr;    \
+                                                                 \
+             /* conditions */                                    \
+             __slot != NULL                 &&                   \
+             (key     = __slot->_key   , 1) &&                   \
+             (val_ptr = &(__slot->_val), 1);                     \
+                                                                 \
+             /* increment */                                     \
+             __slot_ptr = &(__slot->_next),                      \
+             __slot = *__slot_ptr)                               \
+            /* LOOP BODY HERE */
+/*********************************************************************
+    END HASH TABLE
+**********************************************************************/
+
+static u64 bk_scfg_str_hash(bk_scfg_str s) {
+    unsigned long hash = 5381;
+    int c;
+
+    while ((c = *s++))
+    hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+
+    return hash;
+}
+
+static int bk_scfg_str_equ(bk_scfg_str a, bk_scfg_str b) { return strcmp(a, b) == 0; }
+
+
+
+typedef hash_table(bk_scfg_str, bk_scfg_entry_t) bk_hash_table_t;
+
+
+struct bk_scfg {
+    bk_hash_table_t  table;
+    const char      *err_msg;
+    u32              err_kind;
+    const char      *valid_err_msg;
+};
+
+#define BK_SCFG_SET_ERR(cfg, kind, fmt, ...)                 \
+do {                                                         \
+    char __bk_scfg_err_buff[512];                            \
+                                                             \
+    snprintf(__bk_scfg_err_buff, 512, (fmt), ##__VA_ARGS__); \
+    if ((cfg)->err_msg) {                                    \
+        free((void*)(cfg)->err_msg);                         \
+    }                                                        \
+    (cfg)->err_msg  = strdup(__bk_scfg_err_buff);            \
+    (cfg)->err_kind = (kind);                                \
+} while (0)
+
+static struct bk_scfg* bk_scfg_make(void) {
+    struct bk_scfg *cfg;
+
+    cfg = (struct bk_scfg*)bk_imalloc(sizeof(*cfg));
+    memset((void*)cfg, 0, sizeof(*cfg));
+
+    cfg->table = hash_table_make_e(bk_scfg_str, bk_scfg_entry_t, bk_scfg_str_hash, (void*)bk_scfg_str_equ);
+
+    return cfg;
+}
+
+static void bk_scfg_free(struct bk_scfg *cfg) {
+    const char      *key;
+    bk_scfg_entry_t *val;
+
+    hash_table_traverse(cfg->table, key, val) {
+        bk_scfg_entry_free(val);
+        bk_ifree((void*)key);
+    }
+
+    hash_table_free(cfg->table);
+    bk_ifree(cfg);
+}
+
+static void bk_scfg_add_entry(struct bk_scfg *cfg, const char *key, u32 kind, void *addr) {
+    bk_scfg_entry_t  new_entry,
+                    *entry;
+
+    entry = hash_table_get_val(cfg->table, key);
+
+    if (!entry) {
+        memset((void*)&new_entry, 0, sizeof(new_entry));
+        new_entry.kind  = kind;
+        new_entry._addr = addr;
+        hash_table_insert(cfg->table, strdup(key), new_entry);
+    } else {
+        bk_scfg_entry_free(entry);
+        memset((void*)entry, 0, sizeof(*entry));
+        entry->kind  = kind;
+        entry->_addr = addr;
+    }
+}
+
+static void bk_scfg_add_bool(struct bk_scfg *cfg, const char *key, u32 *addr) {
+    bk_scfg_add_entry(cfg, key, BK_SCFG_KIND_BOOL, addr);
+}
+
+static void bk_scfg_add_int(struct bk_scfg *cfg, const char *key, s32 *addr) {
+    bk_scfg_add_entry(cfg, key, BK_SCFG_KIND_INT, addr);
+}
+
+static void bk_scfg_add_float(struct bk_scfg *cfg, const char *key, float *addr) {
+    bk_scfg_add_entry(cfg, key, BK_SCFG_KIND_FLOAT, addr);
+}
+
+static void bk_scfg_add_string(struct bk_scfg *cfg, const char *key, const char **addr) {
+    bk_scfg_add_entry(cfg, key, BK_SCFG_KIND_STRING, addr);
+}
+
+
+#define GET_ENTRY(_cfg, _entry_ptr, _key, _kind)              \
+    ((_entry_ptr) = hash_table_get_val((_cfg)->table, (_key)),\
+    ((_entry_ptr) ? (_entry_ptr)->kind == (_kind) : 0))
+
+static void bk_scfg_require(struct bk_scfg *cfg, const char *key) {
+    bk_scfg_entry_t *entry;
+
+    entry = hash_table_get_val(cfg->table, key);
+
+    if (entry) {
+        entry->flags |= BK_SCFG_ENTRY_REQUIRED;
+    }
+}
+
+
+static void bk_scfg_default_bool(struct bk_scfg *cfg, const char *key, u32 def) {
+    bk_scfg_entry_t *entry;
+
+    if (!GET_ENTRY(cfg, entry, key, BK_SCFG_KIND_BOOL)) { return; }
+
+    entry->bdef   = !!def;
+    entry->flags |= BK_SCFG_ENTRY_HAS_DEFAULT;
+}
+
+static void bk_scfg_default_int(struct bk_scfg *cfg, const char *key, s32 def) {
+    bk_scfg_entry_t *entry;
+
+    if (!GET_ENTRY(cfg, entry, key, BK_SCFG_KIND_INT)) { return; }
+
+    entry->idef   = def;
+    entry->flags |= BK_SCFG_ENTRY_HAS_DEFAULT;
+}
+
+static void bk_scfg_default_float(struct bk_scfg *cfg, const char *key, float def) {
+    bk_scfg_entry_t *entry;
+
+    if (!GET_ENTRY(cfg, entry, key, BK_SCFG_KIND_FLOAT)) { return; }
+
+    entry->fdef   = def;
+    entry->flags |= BK_SCFG_ENTRY_HAS_DEFAULT;
+}
+
+static void bk_scfg_default_string(struct bk_scfg *cfg, const char *key, const char *def) {
+    bk_scfg_entry_t *entry;
+
+    if (!GET_ENTRY(cfg, entry, key, BK_SCFG_KIND_STRING)) { return; }
+
+    entry->sdef   = strdup(def);
+    entry->flags |= BK_SCFG_ENTRY_HAS_DEFAULT;
+}
+
+static void bk_scfg_validate_bool(struct bk_scfg *cfg, const char *key, bk_scfg_validate_bool_fn_t validate) {
+    bk_scfg_entry_t *entry;
+
+    if (!GET_ENTRY(cfg, entry, key, BK_SCFG_KIND_BOOL)) { return; }
+
+    entry->validate = (void*)validate;
+}
+
+static void bk_scfg_validate_int(struct bk_scfg *cfg, const char *key, bk_scfg_validate_int_fn_t validate) {
+    bk_scfg_entry_t *entry;
+
+    if (!GET_ENTRY(cfg, entry, key, BK_SCFG_KIND_INT)) { return; }
+
+    entry->validate = (void*)validate;
+}
+
+static void bk_scfg_validate_float(struct bk_scfg *cfg, const char *key, bk_scfg_validate_float_fn_t validate) {
+    bk_scfg_entry_t *entry;
+
+    if (!GET_ENTRY(cfg, entry, key, BK_SCFG_KIND_FLOAT)) { return; }
+
+    entry->validate = (void*)validate;
+}
+
+static void bk_scfg_validate_string(struct bk_scfg *cfg, const char *key, bk_scfg_validate_string_fn_t validate) {
+    bk_scfg_entry_t *entry;
+
+    if (!GET_ENTRY(cfg, entry, key, BK_SCFG_KIND_STRING)) { return; }
+
+    entry->validate = (void*)validate;
+}
+
+
+static void bk_scfg_validate_set_err(struct bk_scfg *cfg, const char *msg) {
+    if (cfg->valid_err_msg) {
+        bk_ifree((void*)cfg->valid_err_msg);
+    }
+    cfg->valid_err_msg = bk_istrdup(msg);
+}
+
+static int bk_sh_split(const char *s, char **words) {
+    int      n;
+    char    *copy,
+            *sub,
+            *sub_p;
+    char     c, prev;
+    int      len,
+             start,
+             end,
+             q,
+             sub_len,
+             i;
+
+#define SH_PUSH(word) \
+do {                  \
+    words[n]  = word; \
+    n        += 1;    \
+} while (0)
+
+    n     = 0;
+    copy  = bk_istrdup(s);
+    len   = strlen(copy);
+    start = 0;
+    end   = 0;
+    prev  = 0;
+
+    while (start < len && bk_is_space(copy[start])) { start += 1; }
+
+    while (start < len) {
+        c   = copy[start];
+        q   = 0;
+        end = start;
+
+        if (c == '#' && prev != '\\') {
+            break;
+        } else if (c == '"') {
+            start += 1;
+            prev   = copy[end];
+            while (end + 1 < len
+            &&    (copy[end + 1] != '"' || prev == '\\')) {
+                end += 1;
+                prev = copy[end];
+            }
+            q = 1;
+        } else if (c == '\'') {
+            start += 1;
+            prev   = copy[end];
+            while (end + 1 < len
+            &&    (copy[end + 1] != '\'' || prev == '\\')) {
+                end += 1;
+                prev = copy[end];
+            }
+            q = 1;
+        } else {
+            while (end + 1 < len
+            &&     !bk_is_space(copy[end + 1])) {
+                end += 1;
+            }
+        }
+
+        sub_len = end - start + 1;
+        if (q && sub_len == 0 && start == len) {
+            sub    = (char*)bk_imalloc(2);
+            sub[0] = copy[end];
+            sub[1] = 0;
+        } else {
+            sub   = (char*)bk_imalloc(sub_len + 1);
+            sub_p = sub;
+            for (i = 0; i < sub_len; i += 1) {
+                c = copy[start + i];
+                if (c == '\\'
+                &&  i < sub_len - 1
+                &&  (copy[start + i + 1] == '"'
+                || copy[start + i + 1] == '\''
+                || copy[start + i + 1] == '#')) {
+                    continue;
+                }
+                *sub_p = c;
+                sub_p += 1;
+            }
+            *sub_p = 0;
+        }
+
+        SH_PUSH(sub);
+
+        end  += q;
+        start = end + 1;
+
+        while (start < len && bk_is_space(copy[start])) { start += 1; }
+    }
+
+    bk_ifree(copy);
+
+    return n;
+
+#undef SH_PUSH
+}
+
+static void bk_scfg_validate_entry(struct bk_scfg *cfg, bk_scfg_entry_t *entry, char *key, const char *path, int line_nr) {
+    int valid;
+
+    bk_scfg_validate_set_err(cfg, "failed validation");
+
+    if (entry->validate == NULL) {
+        return;
+    }
+
+    valid = 0;
+
+    switch (entry->kind) {
+        case BK_SCFG_KIND_BOOL:
+            valid = ((bk_scfg_validate_bool_fn_t)entry->validate)(cfg, *entry->baddr);
+            break;
+        case BK_SCFG_KIND_INT:
+            valid = ((bk_scfg_validate_int_fn_t)entry->validate)(cfg, *entry->iaddr);
+            break;
+        case BK_SCFG_KIND_FLOAT:
+            valid = ((bk_scfg_validate_float_fn_t)entry->validate)(cfg, *entry->faddr);
+            break;
+        case BK_SCFG_KIND_STRING:
+            valid = ((bk_scfg_validate_string_fn_t)entry->validate)(cfg, *entry->saddr);
+            break;
+    }
+
+    if (!valid) {
+        BK_SCFG_SET_ERR(cfg, BK_SCFG_ERR_VALIDATE, "%s line %d: option '%s': %s", path, line_nr, key, cfg->valid_err_msg);
+    }
+}
+
+static void bk_scfg_parse_bool(struct bk_scfg *cfg, bk_scfg_entry_t *entry, char *key, const char *path, int line_nr, char *val) {
+    if (strlen(val) == 0) {
+        *entry->baddr = 1;
+    } else
+    if (strcmp(val, "0")     == 0
+    ||  strcmp(val, "f")     == 0
+    ||  strcmp(val, "F")     == 0
+    ||  strcmp(val, "false") == 0
+    ||  strcmp(val, "False") == 0
+    ||  strcmp(val, "FALSE") == 0
+    ||  strcmp(val, "off")   == 0
+    ||  strcmp(val, "Off")   == 0
+    ||  strcmp(val, "OFF")   == 0
+    ||  strcmp(val, "n")     == 0
+    ||  strcmp(val, "N")     == 0
+    ||  strcmp(val, "no")    == 0
+    ||  strcmp(val, "No")    == 0
+    ||  strcmp(val, "NO")    == 0) {
+        *entry->baddr = 0;
+    } else
+    if (strcmp(val, "1")    == 0
+    ||  strcmp(val, "t")    == 0
+    ||  strcmp(val, "T")    == 0
+    ||  strcmp(val, "true") == 0
+    ||  strcmp(val, "True") == 0
+    ||  strcmp(val, "TRUE") == 0
+    ||  strcmp(val, "on")   == 0
+    ||  strcmp(val, "On")   == 0
+    ||  strcmp(val, "ON")   == 0
+    ||  strcmp(val, "y")    == 0
+    ||  strcmp(val, "Y")    == 0
+    ||  strcmp(val, "yes")  == 0
+    ||  strcmp(val, "Yes")  == 0
+    ||  strcmp(val, "YES")  == 0) {
+        *entry->baddr = 1;
+    } else {
+        BK_SCFG_SET_ERR(cfg, BK_SCFG_ERR_BAD_VAL, "%s line %d: option '%s': could not parse bool from '%s'", path, line_nr, key, val);
+    }
+}
+
+static void bk_scfg_parse_int(struct bk_scfg *cfg, bk_scfg_entry_t *entry, char *key, const char *path, int line_nr, char *val) {
+    if (!sscanf(val, "%d", entry->iaddr)) {
+        BK_SCFG_SET_ERR(cfg, BK_SCFG_ERR_BAD_VAL, "%s line %d: option '%s': could not parse int from '%s'", path, line_nr, key, val);
+    }
+}
+
+static void bk_scfg_parse_float(struct bk_scfg *cfg, bk_scfg_entry_t *entry, char *key, const char *path, int line_nr, char *val) {
+    if (!sscanf(val, "%f", entry->faddr)) {
+        BK_SCFG_SET_ERR(cfg, BK_SCFG_ERR_BAD_VAL, "%s line %d: option '%s': could not parse float from '%s'", path, line_nr, key, val);
+    }
+}
+
+static void bk_scfg_parse_line(struct bk_scfg *cfg, const char *path, char *line, int line_nr) {
+    char            *words[64];
+    int              n, i;
+    char            *key;
+    bk_scfg_entry_t *entry;
+    char            *val;
+
+    n = bk_sh_split(line, words);
+
+    if (n == 0) { goto out; }
+    if (n >= 3) {
+        BK_SCFG_SET_ERR(cfg, BK_SCFG_ERR_BAD_SYNTAX,
+                     "%s line %d: unexpected extra token%s ('%s'...) after '%s'",
+                     path, line_nr,
+                     n == 3 ? "" : "s",
+                     words[2],
+                     words[1]);
+        goto out;
+    }
+
+    key   = words[0];
+    entry = hash_table_get_val(cfg->table, key);
+
+    if (!entry) {
+        BK_SCFG_SET_ERR(cfg, BK_SCFG_ERR_BAD_KEY, "%s line %d: '%s' is not a configurable option", path, line_nr, key);
+        goto out;
+    }
+
+    if (n == 1) {
+        if (entry->kind != BK_SCFG_KIND_BOOL) {
+            BK_SCFG_SET_ERR(cfg, BK_SCFG_ERR_BAD_VAL, "%s line %d: missing value for option '%s'", path, line_nr, key);
+            goto out;
+        }
+
+        *entry->baddr = 1;
+    } else {
+        val = words[1];
+
+        switch (entry->kind) {
+            case BK_SCFG_KIND_BOOL:
+                bk_scfg_parse_bool(cfg, entry, key, path, line_nr, val);
+                break;
+            case BK_SCFG_KIND_INT:
+                bk_scfg_parse_int(cfg, entry, key, path, line_nr, val);
+                break;
+            case BK_SCFG_KIND_FLOAT:
+                bk_scfg_parse_float(cfg, entry, key, path, line_nr, val);
+                break;
+            case BK_SCFG_KIND_STRING:
+                *entry->saddr = strdup(val);
+                break;
+        }
+    }
+
+    if (cfg->err_kind == BK_SCFG_ERR_NONE) {
+        entry->flags |= BK_SCFG_ENTRY_SET;
+        bk_scfg_validate_entry(cfg, entry, key, path, line_nr);
+    }
+
+out:
+    for (i = 0; i < n; i += 1) {
+        bk_ifree(words[i]);
+    }
+}
+
+static void bk_scfg_apply_default(struct bk_scfg *cfg, bk_scfg_entry_t *entry) {
+    switch (entry->kind) {
+        case BK_SCFG_KIND_BOOL:   *entry->baddr = entry->bdef; break;
+        case BK_SCFG_KIND_INT:    *entry->iaddr = entry->idef; break;
+        case BK_SCFG_KIND_FLOAT:  *entry->faddr = entry->fdef; break;
+        case BK_SCFG_KIND_STRING:
+            *entry->saddr = entry->sdef;
+            entry->sdef   = NULL;
+            break;
+    }
+    entry->flags |= BK_SCFG_ENTRY_SET;
+}
+
+static int bk_scfg_parse(struct bk_scfg *cfg, const char *path, int require_file) {
+    FILE         *f;
+    int           line_nr;
+    char          line[512];
+    const char   *key;
+    bk_scfg_entry_t *entry;
+
+    f = fopen(path, "r");
+
+    if (f != NULL) {
+        line_nr = 0;
+        while (fgets(line, sizeof(line), f)) {
+            line_nr += 1;
+
+            bk_scfg_parse_line(cfg, path, line, line_nr);
+            if (cfg->err_kind != BK_SCFG_ERR_NONE) { break; }
+        }
+
+        fclose(f);
+    } else if (require_file) {
+        BK_SCFG_SET_ERR(cfg, BK_SCFG_ERR_BAD_FILE, "unable to fopen path '%s'", path);
+        return cfg->err_kind;
+    }
+
+    if (cfg->err_kind == BK_SCFG_ERR_NONE) {
+        hash_table_traverse(cfg->table, key, entry) {
+            if (!(entry->flags & BK_SCFG_ENTRY_SET)) {
+                if (entry->flags & BK_SCFG_ENTRY_REQUIRED) {
+                    BK_SCFG_SET_ERR(cfg, BK_SCFG_ERR_BAD_FILE, "required option '%s' not set", key);
+                    return cfg->err_kind;
+                } else if (entry->flags & BK_SCFG_ENTRY_HAS_DEFAULT) {
+                    bk_scfg_apply_default(cfg, entry);
+                }
+            }
+        }
+    }
+
+    return cfg->err_kind;
+}
+
+static int bk_scfg_parse_env(struct bk_scfg *cfg, int argc, const char **argv) {
+    int              i;
+    const char      *option;
+    char             option_name[512];
+    int              option_len;
+    const char      *val;
+    char             fake_line[1024];
+    const char      *key;
+    bk_scfg_entry_t *entry;
+
+    for (i = 0; i < argc; i += 1) {
+        option = argv[i];
+        if (strlen(option) < 2) {
+            BK_SCFG_SET_ERR(cfg,
+                         BK_SCFG_ERR_BAD_SYNTAX,
+                         "invalid env syntax '%s': expected '--'",
+                         option);
+            goto out;
+        }
+        option += 2;
+
+        option_len = 0;
+        while (option[option_len] && option[option_len] != '=') {
+            option_name[option_len]  = option[option_len];
+            option_len              += 1;
+        }
+        option_name[option_len]  = 0;
+
+        if (option_len == 0) {
+            BK_SCFG_SET_ERR(cfg,
+                         BK_SCFG_ERR_BAD_SYNTAX,
+                         "invalid env syntax '%s': expected option name after '--'",
+                         option - 2);
+            goto out;
+        }
+
+
+        if (option[option_len] == '=') {
+            val = option + option_len + 1;
+            if (strlen(val) == 0) {
+                BK_SCFG_SET_ERR(cfg,
+                            BK_SCFG_ERR_BAD_SYNTAX,
+                            "invalid env syntax '%s': expected value after '='",
+                            option - 2);
+                goto out;
+            }
+        } else {
+            val = option + option_len;
+        }
+
+        snprintf(fake_line, sizeof(fake_line), "%s %s", option_name, val);
+
+        bk_scfg_parse_line(cfg, "<env>", fake_line, 1);
+        if (cfg->err_kind != BK_SCFG_ERR_NONE) { goto out; }
+    }
+
+    if (cfg->err_kind == BK_SCFG_ERR_NONE) {
+        hash_table_traverse(cfg->table, key, entry) {
+            if (!(entry->flags & BK_SCFG_ENTRY_SET)) {
+                if (entry->flags & BK_SCFG_ENTRY_REQUIRED) {
+                    BK_SCFG_SET_ERR(cfg, BK_SCFG_ERR_BAD_FILE, "<env>: required option '%s' not set", key);
+                    return cfg->err_kind;
+                } else if (entry->flags & BK_SCFG_ENTRY_HAS_DEFAULT) {
+                    bk_scfg_apply_default(cfg, entry);
+                }
+            }
+        }
+    }
+
+out:;
+    return cfg->err_kind;
+}
+
+static const char *bk_scfg_err_msg(struct bk_scfg *cfg) {
+    if (cfg->err_msg) {
+        return cfg->err_msg;
+    }
+    return "";
+}
+
+
+typedef struct {
+    struct bk_scfg *_scfg;
+
+    const char *log_to;
+    int         _log_fd;
+    u32         log_allocs;
+    u32         log_frees;
+    u32         log_big;
+    u32         log_blocks;
+    u32         log_heaps;
+    u32         log_gc;
+    u32         log_all;
+    u32         disable_bump;
+    u32         disable_slots;
+    u32         disable_chunks;
+    u32         per_thread_heaps;
+    s32         gc_free_threshold;
+} bk_Config;
+
+static bk_Config bk_config;
+
+enum {
+    BK_OPT_BOOL,
+    BK_OPT_INT,
+    BK_OPT_STRING,
+};
+
+enum {
+    BK_OPT_LOGGING,
+    BK_OPT_HEAPS,
+    BK_OPT_METHODS,
+    BK_OPT_GARBAGE_COLLECTION,
+    BK_NR_OPT_CATEGORIES,
+};
+
+static const char *bk_opt_category_strings[] = {
+    "LOGGING",
+    "HEAPS",
+    "METHODS",
+    "GARBAGE COLLECTION",
+};
+
+typedef struct {
+    char *name;
+    u32   type;
+    u32   category;
+    char *desc;
+    void *ptr;
+} bk_opt;
+
+#define BK_MAX_OPTS (32)
+
+static bk_opt bk_options[BK_MAX_OPTS];
+static u32    bk_n_options;
+
+static void bk_option(const char *name, u32 type, u32 category, const char *desc, void *ptr) {
+    bk_opt *new_opt;
+
+    new_opt       = &bk_options[bk_n_options];
+    bk_n_options += 1;
+
+    new_opt->name     = bk_istrdup(name);
+    new_opt->type     = type;
+    new_opt->category = category;
+    new_opt->desc     = bk_istrdup(desc);
+    new_opt->ptr      = ptr;
+
+    switch (type) {
+        case BK_OPT_BOOL:
+            bk_scfg_add_bool(bk_config._scfg, name, (u32*)ptr);           break;
+        case BK_OPT_INT:
+            bk_scfg_add_int(bk_config._scfg, name, (s32*)ptr);            break;
+        case BK_OPT_STRING:
+            bk_scfg_add_string(bk_config._scfg, name, (const char**)ptr); break;
+    }
+}
+
+static void bk_opt_require(const char *name)                                      { bk_scfg_require(bk_config._scfg, name);             }
+static void bk_opt_default_bool(const char *name, int val)                        { bk_scfg_default_bool(bk_config._scfg, name, val);   }
+static void bk_opt_default_int(const char *name, int val)                         { bk_scfg_default_int(bk_config._scfg, name, val);    }
+static void bk_opt_default_string(const char *name, const char *val)              { bk_scfg_default_string(bk_config._scfg, name, val); }
+/* static void bk_opt_validate_bool(const char *name, bk_scfg_validate_bool_fn_t v)     { bk_scfg_validate_bool(bk_config._scfg, name, v);    } */
+static void bk_opt_validate_int(const char *name, bk_scfg_validate_int_fn_t v)       { bk_scfg_validate_int(bk_config._scfg, name, v);     }
+static void bk_opt_validate_string(const char *name, bk_scfg_validate_string_fn_t v) { bk_scfg_validate_string(bk_config._scfg, name, v);  }
+
+
+void bk_log_config(void) {
+    size_t  max_name_len;
+    bk_opt *o;
+    u32     i;
+    u32     j;
+
+    max_name_len = 0;
+    for (i = 0; i < bk_n_options; i += 1) {
+        o = &bk_options[i];
+        if (strlen(o->name) > max_name_len) {
+            max_name_len = strlen(o->name);
+        }
+    }
+
+    bk_logf("================================ BKMALLOC CONFIG ================================\n");
+    for (i = 0; i < BK_NR_OPT_CATEGORIES; i += 1) {
+        bk_logf("%s:\n", bk_opt_category_strings[i]);
+        for (j = 0; j < bk_n_options; j += 1) {
+            o = &bk_options[j];
+            if (o->category == i) {
+                switch (o->type) {
+                    case BK_OPT_BOOL:
+                        bk_logf("  %-*s  %s\n", (int)max_name_len, o->name, *(int*)o->ptr ? "YES" : "NO"); break;
+                    case BK_OPT_INT:
+                        bk_logf("  %-*s  %d\n", (int)max_name_len, o->name, *(int*)o->ptr);                break;
+                    case BK_OPT_STRING:
+                        bk_logf("  %-*s  '%s'\n", (int)max_name_len, o->name, *(char**)o->ptr);            break;
+                }
+            }
+        }
+    }
+    bk_logf("=================================================================================\n\n");
+}
+
+static int bk_init_config(void) {
+    int         status;
+    int         do_log_config;
+    const char *config_file;
+    const char *env_opts;
+    char       *words[2 * BK_MAX_OPTS];
+    int         n_words;
+
+    status          = 0;
+    do_log_config   = 0;
+    bk_config._scfg = bk_scfg_make();
+
+/******************************* @@@options *******************************/
+
+    bk_option("log-to",                          BK_OPT_STRING, BK_OPT_LOGGING,
+                                                 "Path to log file.",
+                                                 &bk_config.log_to);
+                                                 bk_opt_default_string("log-to", "/dev/stdout");
+    bk_option("log-allocs",                      BK_OPT_BOOL, BK_OPT_LOGGING,
+                                                 "Log allocations.",
+                                                 &bk_config.log_allocs);
+                                                 bk_opt_default_bool("log-allocs", 0);
+    bk_option("log-frees",                       BK_OPT_BOOL, BK_OPT_LOGGING,
+                                                 "Log frees.",
+                                                 &bk_config.log_frees);
+                                                 bk_opt_default_bool("log-frees", 0);
+    bk_option("log-big",                         BK_OPT_BOOL, BK_OPT_LOGGING,
+                                                 "Log allocations and frees of big objects (need their own block).",
+                                                 &bk_config.log_big);
+                                                 bk_opt_default_bool("log-big", 0);
+    bk_option("log-blocks",                      BK_OPT_BOOL, BK_OPT_LOGGING,
+                                                 "Log block allocation and release events.",
+                                                 &bk_config.log_blocks);
+                                                 bk_opt_default_bool("log-blocks", 0);
+    bk_option("log-heaps",                       BK_OPT_BOOL, BK_OPT_LOGGING,
+                                                 "Log heap creation events.",
+                                                 &bk_config.log_heaps);
+                                                 bk_opt_default_bool("log-heaps", 0);
+    bk_option("log-gc",                          BK_OPT_BOOL, BK_OPT_LOGGING,
+                                                 "Log GC events.",
+                                                 &bk_config.log_gc);
+                                                 bk_opt_default_bool("log-gc", 0);
+    bk_option("log-all",                         BK_OPT_BOOL, BK_OPT_LOGGING,
+                                                 "Log everything.",
+                                                 &bk_config.log_all);
+                                                 bk_opt_default_bool("log-all", 0);
+    bk_option("disable-bump",                    BK_OPT_BOOL, BK_OPT_METHODS,
+                                                 "Disable allocation from a block's bump space.",
+                                                 &bk_config.disable_bump);
+                                                 bk_opt_default_bool("disable-bump", 0);
+    bk_option("disable-slots",                   BK_OPT_BOOL, BK_OPT_METHODS,
+                                                 "Disable allocation from a block's slots.",
+                                                 &bk_config.disable_slots);
+                                                 bk_opt_default_bool("disable-slots", 0);
+    bk_option("disable-chunks",                  BK_OPT_BOOL, BK_OPT_METHODS,
+                                                 "Disable allocation from a block's chunk list.",
+                                                 &bk_config.disable_chunks);
+                                                 bk_opt_default_bool("disable-chunks", 0);
+    bk_option("per-thread-heaps",                BK_OPT_BOOL, BK_OPT_HEAPS,
+                                                 "Use per-(hardware)thread heaps to limit lock contention.",
+                                                 &bk_config.per_thread_heaps);
+                                                 bk_opt_default_bool("per-thread-heaps", 1);
+    bk_option("gc-free-threshold",               BK_OPT_INT, BK_OPT_GARBAGE_COLLECTION,
+                                                 "Number of frees to a heap before GC is triggered for that heap.",
+                                                 &bk_config.gc_free_threshold);
+                                                 bk_opt_default_int("gc-free-threshold", 256);
+
+
+
+
+    config_file = getenv("BKMALLOC_CONFIG");
+    if (config_file == NULL) { config_file = "bkmalloc.config"; }
+    status = bk_scfg_parse(bk_config._scfg, config_file, 0);
+
+    if (status == BK_SCFG_ERR_NONE) {
+        env_opts = getenv("BKMALLOC_OPTS");
+        if (env_opts != NULL) {
+            n_words       = bk_sh_split(env_opts, words);
+            do_log_config = (n_words >= 1 && strcmp(words[0], "--log-config") == 0);
+            status        = bk_scfg_parse_env(bk_config._scfg,
+                                              n_words - do_log_config,
+                                              (const char**)(words + do_log_config));
+        }
+    }
+
+    if (status != BK_SCFG_ERR_NONE) {
+        bk_printf("[bkmalloc]: %s\n", bk_scfg_err_msg(bk_config._scfg));
+        goto out;
+    }
+
+    bk_config._log_fd = open(bk_config.log_to, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (bk_config._log_fd == -1) {
+        bk_printf("[bkmalloc]: unable to open log file (%s) -- errno = %d\n", bk_config.log_to, errno);
+        bk_config._log_fd = 0;
+        errno             = 0;
+        status            = -1;
+    }
+
+    if (bk_config.log_all) {
+        bk_config.log_allocs = 1;
+        bk_config.log_frees  = 1;
+        bk_config.log_blocks = 1;
+        bk_config.log_heaps  = 1;
+    }
+
+    if (status == 0 && do_log_config) { bk_log_config(); }
+
+out:;
+    return status;
+}
+
+#undef BK_BK_SCFG_ENTRY_REQUIRED
+#undef BK_BK_SCFG_ENTRY_HAS_DEFAULT
+#undef BK_BK_SCFG_ENTRY_SET
+#undef BK_BK_SCFG_KIND_BOOL
+#undef BK_BK_SCFG_KIND_INT
+#undef BK_BK_SCFG_KIND_FLOAT
+#undef BK_BK_SCFG_KIND_STRING
+#undef BK_SCFG_ERR_NONE
+#undef BK_SCFG_ERR_BAD_FILE
+#undef BK_SCFG_ERR_BAD_SYNTAX
+#undef BK_SCFG_ERR_BAD_KEY
+#undef BK_SCFG_ERR_BAD_VAL
+#undef BK_SCFG_ERR_VALIDATE
+#undef STR
+#undef _STR
+#undef CAT2
+#undef _CAT2
+#undef CAT3
+#undef _CAT3
+#undef CAT4
+#undef _CAT4
+#undef hash_table
+#undef hash_table_make
+#undef hash_table_make_e
+#undef hash_table_len
+#undef hash_table_free
+#undef hash_table_get_key
+#undef hash_table_get_val
+#undef hash_table_insert
+#undef hash_table_delete
+#undef hash_table_traverse
+#undef GET_ENTRY
+#undef BK_BK_SCFG_SET_ERR
 
 
 /******************************* @@blocks *******************************/
@@ -742,10 +2005,8 @@ BK_ALWAYS_INLINE static inline void bk_spin_unlock(bk_Spinlock *spin) { (void)CA
     ((struct bk_Heap*)((b)->meta.heap))
 
 
-enum {
-    BK_CHUNK_IS_FREE,
-    BK_CHUNK_IS_BIG, /* Lone, large allocation that isn't in a block or part of a list. */
-};
+#define BK_CHUNK_IS_FREE   (1ULL << 0ULL)
+#define BK_CHUNK_IS_BIG    (1ULL << 1ULL)
 
 typedef union {
     struct {
@@ -834,7 +2095,11 @@ typedef struct PACKED {
     u32             size_class;
     u32             log2_size_class;
     u32             size_class_idx;
-    u8              _pad1[4];
+    void           *bump_base;
+    void           *bump;
+    u32             n_bump;
+    u32             n_bump_free;
+    u8              _pad1[12];
 } bk_Block_Metadata;
 
 #define BK_CHUNK_SPACE ((2 * BK_MAX_BLOCK_ALLOC_SIZE) - sizeof(bk_Block_Metadata) - sizeof(bk_Slots))
@@ -869,11 +2134,15 @@ enum {
     BK_HEAP_USER,
 };
 
+static u32 bk_hid_counter = 1;
+
 typedef struct bk_Heap {
     u32          flags;
     u32          hid;
     bk_Spinlock  block_list_locks[BK_NR_SIZE_CLASSES];
     bk_Block    *block_lists[BK_NR_SIZE_CLASSES];
+    void        *last_big;
+    u32          free_count;
 } bk_Heap;
 
 
@@ -881,10 +2150,10 @@ static bk_Heap _bk_global_heap;
 #if 0 /* Equivalent to this initialization: */
 
 static bk_Heap _bk_global_heap = {
-    .flags            = 0,
-    .hid              = 0,
-    .block_list_locks = { BK_STATIC_SPIN_LOCK_INIT },
-    .block_lists      = { NULL },
+    .flags                 = 0,
+    .hid                   = 0,
+    .block_list_locks      = { BK_STATIC_SPIN_LOCK_INIT },
+    .block_lists           = { NULL },
 };
 
 #endif
@@ -895,10 +2164,18 @@ static bk_Heap *bk_global_heap = &_bk_global_heap;
 static inline void bk_init_heap(bk_Heap *heap, u32 kind) {
     u32 i;
 
+    memset((void*)heap, 0, sizeof(*heap));
+
     heap->flags |= 1 << kind;
 
     for (i = 0; i < BK_NR_SIZE_CLASSES; i += 1) {
         bk_spin_init(&heap->block_list_locks[i]);
+    }
+
+    heap->hid = FAA(&bk_hid_counter, 1);
+
+    if (bk_config.log_heaps) {
+        bk_logf("heap %u kind %s\n", heap->hid, kind == BK_HEAP_THREAD ? "THREAD" : "USER");
     }
 }
 
@@ -931,10 +2208,13 @@ static inline bk_Block * bk_make_block(bk_Heap *heap, u32 size_class_idx, u64 si
     BK_ASSERT(size >= BK_BLOCK_SIZE,
               "size too small for a block");
 
+    if (!IS_ALIGNED(size, PAGE_SIZE)) { size = ALIGN_UP(size, PAGE_SIZE); }
+
     block = (bk_Block*)bk_get_aligned_pages(size >> LOG2_PAGE_SIZE, BK_BLOCK_ALIGN);
 
     block->meta.heap = heap;
     block->meta.end  = ((u8*)block) + size;
+    block->meta.bump = NULL;
 
     block->meta.size_class_idx = size_class_idx;
 
@@ -949,19 +2229,44 @@ static inline bk_Block * bk_make_block(bk_Heap *heap, u32 size_class_idx, u64 si
         first_chunk->header.offset_prev = 0;
         first_chunk->header.offset_next = 0;
         first_chunk->header.size        = BK_CHUNK_SPACE - sizeof(bk_Chunk);
-        first_chunk->header.flags       = 1ULL << BK_CHUNK_IS_FREE;
+        first_chunk->header.flags       = BK_CHUNK_IS_FREE;
+
+        block->slots.max_allocations = MIN(BK_SLOT_SPACE >> block->meta.log2_size_class, 4096ULL);
+
+        block->meta.bump_base = block->_slot_space + block->meta.size_class * block->slots.max_allocations;
+        block->meta.bump      = block->meta.bump_base;
     }
 
-/*     block->slots.max_allocations = 4096ULL << block->meta.log2_size_class; */
-    block->slots.max_allocations = MIN(BK_SLOT_SPACE >> block->meta.log2_size_class, 4096ULL);
+
+    if (bk_config.log_blocks) {
+        if (block->meta.size_class == BK_BIG_ALLOC_SIZE_CLASS) {
+            bk_logf("block-alloc 0x%X - 0x%X size_class BIG\n", block, block->meta.end);
+        } else {
+            bk_logf("block-alloc 0x%X - 0x%X size_class %U\n", block, block->meta.end, block->meta.size_class);
+        }
+    }
 
     return block;
+}
+
+BK_ALWAYS_INLINE
+static inline void bk_release_block(bk_Block *block) {
+    if (bk_config.log_blocks) {
+        if (block->meta.size_class == BK_BIG_ALLOC_SIZE_CLASS) {
+            bk_logf("block-release 0x%X - 0x%X size_class BIG\n", block, block->meta.end);
+        } else {
+            bk_logf("block-release 0x%X - 0x%X size_class %U\n", block, block->meta.end, block->meta.size_class);
+        }
+    }
+
+    bk_release_pages(block, ((u8*)block->meta.end - (u8*)block) >> LOG2_PAGE_SIZE);
 }
 
 static inline bk_Block * bk_add_block(bk_Heap *heap, u32 size_class_idx) {
     bk_Block *block;
 
-    /* heap->block_list_locks[size_class_idx] must be locked. */
+    BK_ASSERT(heap->block_list_locks[size_class_idx].val == BK_SPIN_LOCKED,
+              "lock not held");
 
     block = bk_make_block(heap, size_class_idx, BK_BLOCK_SIZE);
 
@@ -971,12 +2276,33 @@ static inline bk_Block * bk_add_block(bk_Heap *heap, u32 size_class_idx) {
     return block;
 }
 
-BK_ALWAYS_INLINE
-static inline void bk_release_block(bk_Block *block) {
-    bk_release_pages(block, ((u8*)block->meta.end - (u8*)block) >> LOG2_PAGE_SIZE);
+static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
+    u32       idx;
+    bk_Block *b;
+
+    idx = block->meta.size_class_idx;
+
+    BK_ASSERT(heap->block_list_locks[idx].val == BK_SPIN_LOCKED,
+              "lock not held");
+
+    if (heap->block_lists[idx] == block) {
+        heap->block_lists[idx] = block->meta.next;
+    } else {
+        b = heap->block_lists[idx];
+        while (b->meta.next != NULL) {
+            if (b->meta.next == block) {
+                b->meta.next = block->meta.next;
+                break;
+            }
+            b = b->meta.next;
+        }
+    }
+
+    bk_release_block(block);
 }
 
-static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
+static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int zero_mem, bk_Block **blockp) {
+    void     *last_big;
     u64       request_size;
     bk_Block *block;
     u8       *mem_start;
@@ -989,6 +2315,20 @@ static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
     BK_ASSERT(alignment <= BK_BLOCK_ALIGN / 2,
               "alignment is too large");
 
+
+    last_big = heap->last_big;
+    if (last_big != NULL && IS_ALIGNED(last_big, alignment)) {
+        chunk = CHUNK_FROM_USER_MEM(heap->last_big);
+        if (chunk->header.big_size >= n_bytes) {
+            if (CAS(&heap->last_big, last_big, NULL)) {
+                if (zero_mem) {
+                    memset(last_big, 0, n_bytes);
+                }
+                return last_big;
+            }
+        }
+    }
+
     n_bytes = ALIGN_UP(n_bytes, PAGE_SIZE) + PAGE_SIZE;
 
     /* Ask for memory twice the desired size so that we can get aligned memory. */
@@ -996,28 +2336,40 @@ static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
 
     block = bk_make_block(heap, BK_BIG_ALLOC_SIZE_CLASS_IDX, MAX(request_size, BK_BLOCK_SIZE));
 
+    *blockp = block;
+
     mem_start = block->_chunk_space;
 
     aligned = ALIGN_UP(mem_start, alignment);
+
+    BK_ASSERT(ADDR_PARENT_BLOCK(aligned) == block,
+              "big allocation too far from block start");
 
     BK_ASSERT((u8*)aligned + n_bytes <= (u8*)block->meta.end,
               "big alloc doesn't fit in its block");
 
     chunk = (bk_Chunk*)((u8*)aligned - sizeof(bk_Chunk));
-    chunk->header.big_flags = 1ULL << BK_CHUNK_IS_BIG;
+    chunk->header.big_flags = BK_CHUNK_IS_BIG;
     chunk->header.big_size  = (u8*)block->meta.end - (u8*)aligned;
 
-    BK_ASSERT(IS_ALIGNED(aligned, alignment),
-              "did not align big alloc");
+    BK_ASSERT((u8*)chunk >= block->_chunk_space,
+              "chunk too low in block");
+
+    if (bk_config.log_big) {
+        bk_logf("big-alloc 0x%X size %U align %U\n", aligned, n_bytes, alignment);
+    }
 
     return aligned;
 }
 
 static inline void bk_big_free(bk_Heap *heap, bk_Block *block, void *addr) {
-    (void)heap;
-    (void)addr;
+    if (!CAS(&heap->last_big, NULL, addr)) {
+        bk_release_block(block);
+    }
 
-    bk_release_block(block);
+    if (bk_config.log_big) {
+        bk_logf("big-free 0x%X\n", addr);
+    }
 }
 
 BK_ALWAYS_INLINE
@@ -1037,7 +2389,7 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
     chunk = BK_BLOCK_FIRST_CHUNK(block);
 
     while (chunk != NULL) {
-        if (chunk->header.flags & (1ULL << BK_CHUNK_IS_FREE)) {
+        if (chunk->header.flags & BK_CHUNK_IS_FREE) {
             addr     = CHUNK_USER_MEM(chunk);
             aligned  = IS_ALIGNED(addr, alignment) ? addr : ALIGN_UP(addr, alignment);
             end      = (void*)((u8*)addr + chunk->header.size);
@@ -1047,6 +2399,9 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
                 if ((u64)((u8*)end - (u8*)used_end) >= sizeof(bk_Chunk) + block->meta.size_class) {
                     next  = CHUNK_NEXT(chunk);
                     split = CHUNK_FROM_USER_MEM(ALIGN_UP((u8*)used_end + sizeof(bk_Chunk), MIN_ALIGN));
+
+                    BK_ASSERT(split > chunk,
+                              "bad split point");
 
                     if (next != NULL) {
                         split->header.offset_next = CHUNK_DISTANCE(next, split);
@@ -1062,9 +2417,17 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
 
                     BK_ASSERT(chunk->header.size >= n_bytes,
                               "split made chunk too small");
+                    BK_ASSERT((u8*)chunk + sizeof(bk_Chunk) + chunk->header.size == (u8*)split,
+                              "bad split left");
+                    BK_ASSERT((u8*)split + sizeof(bk_Chunk) + split->header.size == (u8*)end,
+                              "bad split right");
+                    BK_ASSERT(CHUNK_NEXT(chunk) == split,
+                              "bad split link");
+                    BK_ASSERT(next != NULL || (u8*)split + sizeof(bk_Chunk) + split->header.size == block->_chunk_space + BK_CHUNK_SPACE,
+                              "right split has no next, but doesn't span rest of chunk space");
                 }
 
-                chunk->header.flags &= ~(1ULL << BK_CHUNK_IS_FREE);
+                chunk->header.flags &= ~BK_CHUNK_IS_FREE;
 
                 BK_ASSERT((u8*)CHUNK_USER_MEM(chunk) + chunk->header.size <= block->_chunk_space + BK_CHUNK_SPACE,
                           "chunk goes beyond chunk space");
@@ -1082,9 +2445,9 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
 
 BK_ALWAYS_INLINE
 static inline void bk_free_chunk(bk_Heap *heap, bk_Block *block, bk_Chunk *chunk) {
-    BK_ASSERT(!(chunk->header.flags & (1ULL << BK_CHUNK_IS_FREE)),
+    BK_ASSERT(!(chunk->header.flags & BK_CHUNK_IS_FREE),
               "double free");
-    chunk->header.flags |= (1ULL << BK_CHUNK_IS_FREE);
+    chunk->header.flags |= BK_CHUNK_IS_FREE;
 }
 
 BK_ALWAYS_INLINE
@@ -1119,6 +2482,8 @@ static inline void * bk_alloc_slot(bk_Heap *heap, bk_Block *block) {
 
     addr = block->_slot_space + (((r << 6ULL) + s) << block->meta.log2_size_class);
 
+    BK_ASSERT((u8*)addr >= block->_slot_space,
+              "slot is too low in block");
     BK_ASSERT((u8*)addr + block->meta.size_class <= (u8*)block->meta.end,
               "slot goes beyond block");
 
@@ -1147,25 +2512,43 @@ static inline void bk_free_slot(bk_Heap *heap, bk_Block *block, void *addr) {
 
 BK_ALWAYS_INLINE
 static inline void * bk_alloc_from_block(bk_Heap *heap, bk_Block *block, u64 n_bytes, u64 alignment) {
-    void *mem;
+    void     *mem;
+    bk_Chunk *chunk;
 
-    if (block->meta.size_class - n_bytes < CACHE_LINE
-    &&  alignment <= block->meta.size_class) {
-
-        if ((mem = bk_alloc_slot(heap, block))) { goto out; }
+    /* From slots? */
+    if (!bk_config.disable_slots) {
+        if (block->meta.size_class - n_bytes < CACHE_LINE
+        &&  likely(alignment <= block->meta.size_class)) {
+            if ((mem = bk_alloc_slot(heap, block))) { goto out; }
+        }
     }
 
-    mem = bk_alloc_chunk(heap, block, n_bytes, alignment);
+    /* Use a chunk? */
+    if (!bk_config.disable_chunks) {
+        if ((mem = bk_alloc_chunk(heap, block, n_bytes, alignment))) { goto out; }
+    }
 
-    BK_ASSERT((u8*)mem + n_bytes <= (u8*)block->meta.end,
-              "allocation goes past block bounds");
+    /* From bump space? */
+    if (!bk_config.disable_bump) {
+        mem = ALIGN_UP(block->meta.bump, MAX(MIN_ALIGN, alignment));
+        if ((u8*)mem + n_bytes <= (u8*)block->meta.end) {
+            chunk = CHUNK_FROM_USER_MEM(mem);
+            chunk->header.size  = n_bytes;
+
+            block->meta.bump    = (u8*)mem + n_bytes;
+            block->meta.n_bump += 1;
+
+            goto out;
+        }
+        mem = NULL;
+    }
 
 out:;
     return mem;
 }
 
-BK_ALWAYS_INLINE
-static inline void * bk_heap_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
+BK_ALWAYS_INLINE HOT
+static inline void * bk_heap_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int zero_mem) {
     void     *mem;
     u32       size_class_idx;
     bk_Block *block;
@@ -1175,7 +2558,10 @@ static inline void * bk_heap_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
     mem = NULL;
 
     if (unlikely(n_bytes > BK_MAX_BLOCK_ALLOC_SIZE)) {
-        return bk_big_alloc(heap, n_bytes, alignment);
+        mem = bk_big_alloc(heap, n_bytes, alignment, zero_mem, &block);
+        /* Zeroing the memory will be handled for us for big allocs */
+        zero_mem = 0;
+        goto out;
     } else if (!IS_ALIGNED(n_bytes, MIN_ALIGN)) {
         n_bytes = ALIGN_UP(n_bytes, MIN_ALIGN);
     } else if (unlikely(n_bytes == 0)) {
@@ -1200,15 +2586,104 @@ static inline void * bk_heap_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
 out_unlock:;
     bk_spin_unlock(&heap->block_list_locks[size_class_idx]);
 
-    BK_ASSERT(mem != NULL,                "failed to get memory");
-    BK_ASSERT(IS_ALIGNED(mem, alignment), "failed to align memory");
+out:;
+    BK_ASSERT(mem != NULL,
+              "failed to get memory");
+    BK_ASSERT(IS_ALIGNED(mem, alignment),
+              "failed to align memory");
+    BK_ASSERT((u8*)mem >= block->_chunk_space,
+              "mem is too low in the block");
+    BK_ASSERT(bk_malloc_size(mem) >= n_bytes,
+              "did not get enough space for allocation");
+
+    if (zero_mem) {
+        memset(mem, 0, n_bytes);
+    }
+
+    if (bk_config.log_allocs) {
+        bk_logf("alloc 0x%X size %U align %U\n", mem, n_bytes, alignment);
+    }
 
     return mem;
 }
 
-BK_ALWAYS_INLINE
+static inline void bk_gc_block(bk_Heap *heap, bk_Block *block) {
+    bk_Chunk *chunk;
+    bk_Chunk *next;
+
+    BK_ASSERT(heap->block_list_locks[block->meta.size_class_idx].val == BK_SPIN_LOCKED,
+              "lock not held");
+
+    chunk = BK_BLOCK_FIRST_CHUNK(block);
+    while (CHUNK_HAS_NEXT(chunk)) {
+        next = CHUNK_NEXT(chunk);
+
+        if (chunk->header.flags & next->header.flags & BK_CHUNK_IS_FREE) {
+            chunk->header.size += sizeof(bk_Chunk) + next->header.size;
+            if (next->header.offset_next == 0) {
+                chunk->header.offset_next = 0;
+            } else {
+                chunk->header.offset_next = sizeof(bk_Chunk) + chunk->header.size;
+                BK_ASSERT(CHUNK_NEXT(chunk) == next,
+                          "bad coalesce patch");
+            }
+        } else {
+            chunk = next;
+        }
+    }
+
+    /* Can we release this block? */
+    if (block->slots.n_allocations == 0
+    &&  block->meta.n_bump == block->meta.n_bump_free) {
+
+        chunk = BK_BLOCK_FIRST_CHUNK(block);
+        if (chunk->header.flags & BK_CHUNK_IS_FREE
+        &&  CHUNK_NEXT(chunk) == NULL) {
+
+            BK_ASSERT((u8*)chunk + sizeof(bk_Chunk) + chunk->header.size == block->_chunk_space + BK_CHUNK_SPACE,
+                      "lone chunk does not span entire chunk space");
+
+            bk_remove_block(heap, block);
+            return;
+        }
+    }
+
+    if (block->meta.n_bump == block->meta.n_bump_free) {
+        block->meta.bump = block->meta.bump_base;
+    }
+}
+
+static inline void bk_gc_heap(bk_Heap *heap) {
+    u32       i;
+    bk_Block *block;
+    bk_Block *next;
+
+    if (bk_config.log_gc) {
+        bk_logf("gc-heap %u\n", heap->hid);
+    }
+
+    for (i = 0; i < BK_NR_SIZE_CLASSES; i += 1) {
+        bk_spin_lock(&heap->block_list_locks[i]);
+
+        block = heap->block_lists[i];
+        while (block != NULL) {
+            /* bk_gc_block() might destroy block (and remove it from the list,
+               so get next first. */
+            next = block->meta.next;
+            bk_gc_block(heap, block);
+            block = next;
+        }
+
+        bk_spin_unlock(&heap->block_list_locks[i]);
+    }
+
+    heap->free_count = 0;
+}
+
+BK_ALWAYS_INLINE HOT
 static inline void bk_heap_free(bk_Heap *heap, void *addr) {
     bk_Block *block;
+    u32       fc;
 
     block = ADDR_PARENT_BLOCK(addr);
 
@@ -1219,18 +2694,35 @@ static inline void bk_heap_free(bk_Heap *heap, void *addr) {
                     && addr <  (void*)(block->_chunk_space + BK_CHUNK_SPACE))
                   ||  (addr >= (void*)block->_slot_space
                     && addr <  (void*)(block->_slot_space + BK_SLOT_SPACE)),
-                "addr is not in a valid location within the block");
+                  "addr is not in a valid location within the block");
 
-        if (addr < (void*)&block->slots) {
+
+        if (addr >= block->meta.bump_base) {
+            FAA(&block->meta.n_bump_free, 1);
+        } else if (addr < (void*)&block->slots) {
+            bk_spin_lock(&heap->block_list_locks[block->meta.size_class_idx]);
             bk_free_chunk(heap, block, CHUNK_FROM_USER_MEM(addr));
+            bk_spin_unlock(&heap->block_list_locks[block->meta.size_class_idx]);
         } else {
+            bk_spin_lock(&heap->block_list_locks[block->meta.size_class_idx]);
             bk_free_slot(heap, block, addr);
+            bk_spin_unlock(&heap->block_list_locks[block->meta.size_class_idx]);
         }
+
+
+        fc = FAA(&heap->free_count, 1);
+        if (fc >= (u32)bk_config.gc_free_threshold) {
+            bk_gc_heap(heap);
+        }
+    }
+
+    if (bk_config.log_frees) {
+        bk_logf("free 0x%X  free_count: %u\n", addr, heap->free_count);
     }
 }
 
 static void *bk_imalloc(u64 n_bytes) {
-    return bk_heap_alloc(bk_global_heap, n_bytes, MIN_ALIGN);
+    return bk_heap_alloc(bk_global_heap, n_bytes, MIN_ALIGN, 0);
 }
 
 static void  bk_ifree(void *addr)    {
@@ -1243,6 +2735,18 @@ static void  bk_ifree(void *addr)    {
 
         bk_heap_free(heap, addr);
     }
+}
+
+static char *bk_istrdup(const char *s) {
+    u64   len;
+    char *ret;
+
+    len = strlen(s);
+    ret = (char*)bk_imalloc(len + 1);
+
+    memcpy(ret, s, len + 1);
+
+    return ret;
 }
 
 
@@ -1328,9 +2832,9 @@ static inline void bk_init(void) {
                   "slot space isn't aligned");
 
         bk_release_block(test_block);
-#else
-        (void)test_block;
 #endif
+
+        if (bk_init_config() != 0) { exit(1); }
 
         bk_init_threads();
 
@@ -1346,19 +2850,43 @@ static inline void bk_init(void) {
 extern "C" {
 #endif /* __cplusplus */
 
+#define GET_HEAP(_size)                                           \
+    (((_size) <= CACHE_LINE || unlikely(!bk_is_initialized || !bk_config.per_thread_heaps)) \
+        ? bk_global_heap                                          \
+        : bk_get_this_thread_heap())
+
 BK_ALWAYS_INLINE
-inline void * bk_heap_malloc(struct bk_Heap *heap, size_t n_bytes) {
-    return bk_heap_alloc(heap, n_bytes, MIN_ALIGN);
+static inline void * _bk_alloc(u64 n_bytes, u64 alignment, int zero_mem) {
+    bk_Heap *heap;
+
+    heap = GET_HEAP(n_bytes);
+    return bk_heap_alloc(heap, n_bytes, alignment, zero_mem);
 }
 
 BK_ALWAYS_INLINE
-inline void * bk_heap_calloc(struct bk_Heap *heap, size_t count, size_t n_bytes) {
+static inline void * bk_alloc(u64 n_bytes, u64 alignment) {
+    return _bk_alloc(n_bytes, alignment, 0);
+}
+
+BK_ALWAYS_INLINE
+static inline void * bk_zalloc(u64 n_bytes, u64 alignment) {
+    return _bk_alloc(n_bytes, alignment, 1);
+}
+
+BK_ALWAYS_INLINE
+inline void * bk_malloc(size_t n_bytes) {
+    return bk_alloc(n_bytes, MIN_ALIGN);
+}
+
+BK_ALWAYS_INLINE
+inline void * bk_calloc(size_t count, size_t n_bytes) {
     u64       new_n_bytes;
     void     *addr;
     bk_Block *block;
 
+    return bk_zalloc(count * n_bytes, MIN_ALIGN);
     new_n_bytes = count * n_bytes;
-    addr        = bk_heap_alloc(heap, new_n_bytes, MIN_ALIGN);
+    addr        = bk_alloc(new_n_bytes, MIN_ALIGN);
     block       = ADDR_PARENT_BLOCK(addr);
 
     if (block->meta.size_class != BK_BIG_ALLOC_SIZE_CLASS) {
@@ -1368,21 +2896,20 @@ inline void * bk_heap_calloc(struct bk_Heap *heap, size_t count, size_t n_bytes)
     return addr;
 }
 
-
 BK_ALWAYS_INLINE
-inline void * bk_heap_realloc(struct bk_Heap *heap, void *addr, size_t n_bytes) {
+inline void * bk_realloc(void *addr, size_t n_bytes) {
     void *new_addr;
     u64   old_size;
 
     new_addr = NULL;
 
     if (addr == NULL) {
-        new_addr = bk_heap_malloc(heap, n_bytes);
+        new_addr = bk_alloc(n_bytes, MIN_ALIGN);
     } else {
         if (likely(n_bytes > 0)) {
             old_size = bk_malloc_size(addr);
             /*
-             * This is done for us in heap_alloc, but we'll
+             * This is done for us in bk_heap_alloc, but we'll
              * need the aligned value when we get the copy length.
              */
             if (!IS_ALIGNED(n_bytes, MIN_ALIGN)) {
@@ -1393,78 +2920,31 @@ inline void * bk_heap_realloc(struct bk_Heap *heap, void *addr, size_t n_bytes) 
              * If it's already big enough, just leave it.
              * We won't worry about shrinking it.
              * Saves us an alloc, free, and memcpy.
-             * Plus, we don't have to lock the thread.
+             * Plus, we don't have to lock anything.
              */
             if (old_size >= n_bytes) {
                 return addr;
             }
 
-            new_addr = bk_heap_malloc(heap, n_bytes);
+            new_addr = bk_alloc(n_bytes, MIN_ALIGN);
             memcpy(new_addr, addr, old_size);
         }
 
-        bk_heap_free(heap, addr);
+        bk_free(addr);
     }
 
     return new_addr;
 }
 
 BK_ALWAYS_INLINE
-inline void * bk_heap_reallocf(struct bk_Heap *heap, void *addr, size_t n_bytes) {
-    return bk_heap_realloc(heap, addr, n_bytes);
+inline void * bk_reallocf(void *addr, size_t n_bytes) {
+    return bk_realloc(addr, n_bytes);
 }
 
 BK_ALWAYS_INLINE
-inline void * bk_heap_valloc(struct bk_Heap *heap, size_t n_bytes) {
-    return bk_heap_alloc(heap, n_bytes, PAGE_SIZE);
+inline void * bk_valloc(size_t n_bytes) {
+    return bk_alloc(n_bytes, PAGE_SIZE);
 }
-
-BK_ALWAYS_INLINE
-inline void * bk_heap_pvalloc(struct bk_Heap *heap, size_t n_bytes) {
-    BK_ASSERT(0, "bk_heap_pvalloc");
-    return NULL;
-}
-
-
-BK_ALWAYS_INLINE
-inline int bk_heap_posix_memalign(struct bk_Heap *heap, void **memptr, size_t alignment, size_t size) {
-    if (unlikely(!IS_POWER_OF_TWO(alignment)
-    ||  alignment < sizeof(void*))) {
-        return EINVAL;
-    }
-
-    *memptr = bk_heap_alloc(heap, size, alignment);
-
-    if (unlikely(*memptr == NULL))    { return ENOMEM; }
-    return 0;
-}
-
-BK_ALWAYS_INLINE
-inline void * bk_heap_aligned_alloc(struct bk_Heap *heap, size_t alignment, size_t size) {
-    return bk_heap_alloc(heap, size, alignment);
-}
-
-BK_ALWAYS_INLINE
-inline void * bk_heap_memalign(struct bk_Heap *heap, size_t alignment, size_t size) {
-    return bk_heap_alloc(heap, size, alignment);
-}
-
-
-#define GET_HEAP(_size)                                                \
-    ((unlikely(!bk_is_initialized) || (_size) > THREAD_MAX_ALLOC_SIZE) \
-        ? bk_global_heap                                               \
-        : bk_get_this_thread_heap())
-
-BK_ALWAYS_INLINE
-inline void * bk_malloc(size_t n_bytes)               { return bk_heap_malloc(GET_HEAP(n_bytes), n_bytes);                }
-BK_ALWAYS_INLINE
-inline void * bk_calloc(size_t count, size_t n_bytes) { return bk_heap_calloc(GET_HEAP(count * n_bytes), count, n_bytes); }
-BK_ALWAYS_INLINE
-inline void * bk_realloc(void *addr, size_t n_bytes)  { return bk_heap_realloc(GET_HEAP(n_bytes), addr, n_bytes);         }
-BK_ALWAYS_INLINE
-inline void * bk_reallocf(void *addr, size_t n_bytes) { return bk_realloc(addr, n_bytes);                                 }
-BK_ALWAYS_INLINE
-inline void * bk_valloc(size_t n_bytes)               { return bk_heap_valloc(GET_HEAP(n_bytes), n_bytes);                }
 
 BK_ALWAYS_INLINE
 inline void bk_free(void *addr) {
@@ -1481,12 +2961,20 @@ inline void bk_free(void *addr) {
 
 BK_ALWAYS_INLINE
 inline int bk_posix_memalign(void **memptr, size_t alignment, size_t n_bytes) {
-    return bk_heap_posix_memalign(GET_HEAP(n_bytes), memptr, alignment, n_bytes);
+    if (unlikely(!IS_POWER_OF_TWO(alignment)
+    ||  alignment < sizeof(void*))) {
+        return EINVAL;
+    }
+
+    *memptr = bk_alloc(n_bytes, alignment);
+
+    if (unlikely(*memptr == NULL))    { return ENOMEM; }
+    return 0;
 }
 
 BK_ALWAYS_INLINE
 inline void * bk_aligned_alloc(size_t alignment, size_t size) {
-    return bk_heap_aligned_alloc(GET_HEAP(size), alignment, size);
+    return bk_alloc(size, alignment);
 }
 
 BK_ALWAYS_INLINE
@@ -1500,6 +2988,8 @@ inline size_t bk_malloc_size(void *addr) {
 
     if (unlikely(block->meta.size_class == BK_BIG_ALLOC_SIZE_CLASS)) {
         chunk = CHUNK_FROM_USER_MEM(addr);
+        BK_ASSERT(chunk->header.big_flags & BK_CHUNK_IS_BIG,
+                  "non-big chunk in big chunk block");
         return chunk->header.big_size;
     } else {
         if ((u8*)addr >= block->_slot_space) {
