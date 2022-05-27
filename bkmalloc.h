@@ -1732,6 +1732,7 @@ static const char *bk_scfg_err_msg(struct bk_scfg *cfg) {
 typedef struct {
     struct bk_scfg *_scfg;
 
+/* LOGGING */
     const char *log_to;
     int         _log_fd;
     u32         log_allocs;
@@ -1741,10 +1742,16 @@ typedef struct {
     u32         log_heaps;
     u32         log_gc;
     u32         log_all;
+/* METHODS */
     u32         disable_bump;
     u32         disable_slots;
     u32         disable_chunks;
+/* HEAPS */
     u32         per_thread_heaps;
+    u32         disable_block_reuse;
+    s32         max_block_reuse_list;
+/* GARBAGE COLLECTION */
+    s32         disable_gc;
     s32         gc_free_threshold;
 } bk_Config;
 
@@ -1863,6 +1870,7 @@ static int bk_init_config(void) {
 
 /******************************* @@@options *******************************/
 
+/* LOGGING */
     bk_option("log-to",                          BK_OPT_STRING, BK_OPT_LOGGING,
                                                  "Path to log file.",
                                                  &bk_config.log_to);
@@ -1895,6 +1903,7 @@ static int bk_init_config(void) {
                                                  "Log everything.",
                                                  &bk_config.log_all);
                                                  bk_opt_default_bool("log-all", 0);
+/* METHODS */
     bk_option("disable-bump",                    BK_OPT_BOOL, BK_OPT_METHODS,
                                                  "Disable allocation from a block's bump space.",
                                                  &bk_config.disable_bump);
@@ -1907,10 +1916,24 @@ static int bk_init_config(void) {
                                                  "Disable allocation from a block's chunk list.",
                                                  &bk_config.disable_chunks);
                                                  bk_opt_default_bool("disable-chunks", 0);
+/* HEAPS */
     bk_option("per-thread-heaps",                BK_OPT_BOOL, BK_OPT_HEAPS,
                                                  "Use per-(hardware)thread heaps to limit lock contention.",
                                                  &bk_config.per_thread_heaps);
                                                  bk_opt_default_bool("per-thread-heaps", 1);
+    bk_option("disable-block-reuse",             BK_OPT_BOOL, BK_OPT_HEAPS,
+                                                 "Don't maintain the block-reuse list and always allocate new blocks.",
+                                                 &bk_config.disable_block_reuse);
+                                                 bk_opt_default_bool("disable-block-reuse", 0);
+    bk_option("max-block-reuse-list",            BK_OPT_INT, BK_OPT_HEAPS,
+                                                 "Maximum number of blocks in each heap kept unreleased as a cache for new requests.",
+                                                 &bk_config.max_block_reuse_list);
+                                                 bk_opt_default_int("max-block-reuse-list", 4);
+/* GARBAGE COLLECTION */
+    bk_option("disable-gc",                      BK_OPT_BOOL, BK_OPT_GARBAGE_COLLECTION,
+                                                 "Do not perform garbage collection on heaps.",
+                                                 &bk_config.disable_gc);
+                                                 bk_opt_default_bool("disable-gc", 0);
     bk_option("gc-free-threshold",               BK_OPT_INT, BK_OPT_GARBAGE_COLLECTION,
                                                  "Number of frees to a heap before GC is triggered for that heap.",
                                                  &bk_config.gc_free_threshold);
@@ -2008,15 +2031,18 @@ out:;
 #define BK_CHUNK_IS_FREE   (1ULL << 0ULL)
 #define BK_CHUNK_IS_BIG    (1ULL << 1ULL)
 
+#define BK_CHUNK_MAGIC (0xCA57)
+
 typedef union {
     struct {
-        u64 offset_prev  : 20;
+        u64 magic        : 16;
         u64 offset_next  : 20;
-        u64 size         : 21;
+        u64 size         : 25;
         u64 flags        : 3;
     };
     struct {
-        u64 big_size     : 61;
+        u64 big_magic    : 16;
+        u64 big_size     : 45;
         u64 big_flags    : 3;
     };
 } bk_Chunk_Header;
@@ -2026,21 +2052,11 @@ typedef union {
     u64             __u64;
 } bk_Chunk;
 
-#define CHUNK_PREV(addr)                                                  \
-    ((bk_Chunk*)(unlikely(((bk_Chunk*)(addr))->header.offset_prev == 0))  \
-        ? NULL                                                            \
-        :   ((u8*)(addr))                                                 \
-          - (((bk_Chunk*)(addr))->header.offset_prev))
-
 #define CHUNK_NEXT(addr)                                                  \
     ((bk_Chunk*)((unlikely(((bk_Chunk*)(addr))->header.offset_next == 0)) \
         ? NULL                                                            \
         :   ((u8*)(addr))                                                 \
           + (((bk_Chunk*)(addr))->header.offset_next)))
-
-#define CHUNK_PREV_UNCHECKED(addr)                                        \
-    ((bk_Chunk*)(((u8*)(addr))                                            \
-        - (((bk_Chunk*)(addr))->header.offset_prev)))
 
 #define CHUNK_NEXT_UNCHECKED(addr)                                        \
     ((bk_Chunk*)(((u8*)(addr))                                            \
@@ -2099,7 +2115,8 @@ typedef struct PACKED {
     void           *bump;
     u32             n_bump;
     u32             n_bump_free;
-    u8              _pad1[12];
+    u32             has_been_reused;
+    u8              _pad1[8];
 } bk_Block_Metadata;
 
 #define BK_CHUNK_SPACE ((2 * BK_MAX_BLOCK_ALLOC_SIZE) - sizeof(bk_Block_Metadata) - sizeof(bk_Slots))
@@ -2141,11 +2158,13 @@ typedef struct bk_Heap {
     u32          hid;
     bk_Spinlock  block_list_locks[BK_NR_SIZE_CLASSES];
     bk_Block    *block_lists[BK_NR_SIZE_CLASSES];
-    void        *last_big;
+    bk_Spinlock  reuse_list_lock;
+    u32          reuse_list_len;
+    bk_Block    *reuse_list;
     u32          free_count;
 } bk_Heap;
 
-
+static u32     _bk_main_thread_cpu;
 static bk_Heap _bk_global_heap;
 #if 0 /* Equivalent to this initialization: */
 
@@ -2154,6 +2173,9 @@ static bk_Heap _bk_global_heap = {
     .hid                   = 0,
     .block_list_locks      = { BK_STATIC_SPIN_LOCK_INIT },
     .block_lists           = { NULL },
+    .big_list_lock         = BK_STATIC_SPIN_LOCK_INIT,
+    .big_list              = NULL,
+    .free_count            = 0,
 };
 
 #endif
@@ -2201,16 +2223,10 @@ static inline u64 bk_size_class_idx_to_size(u32 idx) {
 }
 
 BK_ALWAYS_INLINE
-static inline bk_Block * bk_make_block(bk_Heap *heap, u32 size_class_idx, u64 size) {
-    bk_Block *block;
+static inline void bk_reset_block(bk_Block *block, bk_Heap *heap, u32 size_class_idx, u64 size) {
     bk_Chunk *first_chunk;
 
-    BK_ASSERT(size >= BK_BLOCK_SIZE,
-              "size too small for a block");
-
-    if (!IS_ALIGNED(size, PAGE_SIZE)) { size = ALIGN_UP(size, PAGE_SIZE); }
-
-    block = (bk_Block*)bk_get_aligned_pages(size >> LOG2_PAGE_SIZE, BK_BLOCK_ALIGN);
+    memset((void*)&block->meta, 0, sizeof(block->meta));
 
     block->meta.heap = heap;
     block->meta.end  = ((u8*)block) + size;
@@ -2226,7 +2242,7 @@ static inline bk_Block * bk_make_block(bk_Heap *heap, u32 size_class_idx, u64 si
         block->meta.log2_size_class = LOG2_SIZE_CLASS_FROM_IDX(size_class_idx);
 
         first_chunk = BK_BLOCK_FIRST_CHUNK(block);
-        first_chunk->header.offset_prev = 0;
+        first_chunk->header.magic       = BK_CHUNK_MAGIC;
         first_chunk->header.offset_next = 0;
         first_chunk->header.size        = BK_CHUNK_SPACE - sizeof(bk_Chunk);
         first_chunk->header.flags       = BK_CHUNK_IS_FREE;
@@ -2236,7 +2252,20 @@ static inline bk_Block * bk_make_block(bk_Heap *heap, u32 size_class_idx, u64 si
         block->meta.bump_base = block->_slot_space + block->meta.size_class * block->slots.max_allocations;
         block->meta.bump      = block->meta.bump_base;
     }
+}
 
+BK_ALWAYS_INLINE
+static inline bk_Block * bk_make_block(bk_Heap *heap, u32 size_class_idx, u64 size) {
+    bk_Block *block;
+
+    BK_ASSERT(size >= BK_BLOCK_SIZE,
+              "size too small for a block");
+
+    if (!IS_ALIGNED(size, PAGE_SIZE)) { size = ALIGN_UP(size, PAGE_SIZE); }
+
+    block = (bk_Block*)bk_get_aligned_pages(size >> LOG2_PAGE_SIZE, BK_BLOCK_ALIGN);
+
+    bk_reset_block(block, heap, size_class_idx, size);
 
     if (bk_config.log_blocks) {
         if (block->meta.size_class == BK_BIG_ALLOC_SIZE_CLASS) {
@@ -2247,6 +2276,48 @@ static inline bk_Block * bk_make_block(bk_Heap *heap, u32 size_class_idx, u64 si
     }
 
     return block;
+}
+
+BK_ALWAYS_INLINE
+static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 size) {
+    bk_Block *block;
+    bk_Block *prev;
+
+    bk_spin_lock(&heap->reuse_list_lock);
+    BK_ASSERT(heap->reuse_list_len <= (u32)bk_config.max_block_reuse_list,
+              "reuse_list too big");
+    block = heap->reuse_list;
+    prev  = NULL;
+    while (block != NULL) {
+        if (((u64)((u8*)block->meta.end - (u8*)block)) >= size) {
+            if (prev == NULL) {
+                heap->reuse_list = block->meta.next;
+            } else {
+                prev->meta.next = block->meta.next;
+            }
+            heap->reuse_list_len -= 1;
+            bk_spin_unlock(&heap->reuse_list_lock);
+
+            bk_reset_block(block, heap, size_class_idx, size);
+
+            block->meta.has_been_reused = 1;
+
+            if (bk_config.log_blocks) {
+                if (block->meta.size_class == BK_BIG_ALLOC_SIZE_CLASS) {
+                    bk_logf("block-reuse 0x%X - 0x%X size_class BIG\n", block, block->meta.end);
+                } else {
+                    bk_logf("block-reuse 0x%X - 0x%X size_class %U\n", block, block->meta.end, block->meta.size_class);
+                }
+            }
+
+            return block;
+        }
+        prev  = block;
+        block = block->meta.next;
+    }
+    bk_spin_unlock(&heap->reuse_list_lock);
+
+    return bk_make_block(heap, size_class_idx, size);
 }
 
 BK_ALWAYS_INLINE
@@ -2268,7 +2339,7 @@ static inline bk_Block * bk_add_block(bk_Heap *heap, u32 size_class_idx) {
     BK_ASSERT(heap->block_list_locks[size_class_idx].val == BK_SPIN_LOCKED,
               "lock not held");
 
-    block = bk_make_block(heap, size_class_idx, BK_BLOCK_SIZE);
+    block = bk_get_block(heap, size_class_idx, BK_BLOCK_SIZE);
 
     block->meta.next                  = heap->block_lists[size_class_idx];
     heap->block_lists[size_class_idx] = block;
@@ -2279,34 +2350,72 @@ static inline bk_Block * bk_add_block(bk_Heap *heap, u32 size_class_idx) {
 static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
     u32       idx;
     bk_Block *b;
+    bk_Block *prev;
 
     idx = block->meta.size_class_idx;
 
-    BK_ASSERT(heap->block_list_locks[idx].val == BK_SPIN_LOCKED,
-              "lock not held");
+    if (idx != BK_BIG_ALLOC_SIZE_CLASS_IDX) {
+        BK_ASSERT(heap->block_list_locks[idx].val == BK_SPIN_LOCKED,
+                "lock not held");
 
-    if (heap->block_lists[idx] == block) {
-        heap->block_lists[idx] = block->meta.next;
-    } else {
-        b = heap->block_lists[idx];
-        while (b->meta.next != NULL) {
-            if (b->meta.next == block) {
-                b->meta.next = block->meta.next;
-                break;
+        if (heap->block_lists[idx] == block) {
+            heap->block_lists[idx] = block->meta.next;
+        } else {
+            b = heap->block_lists[idx];
+            while (b->meta.next != NULL) {
+                if (b->meta.next == block) {
+                    b->meta.next = block->meta.next;
+                    break;
+                }
+                b = b->meta.next;
             }
-            b = b->meta.next;
         }
     }
 
-    bk_release_block(block);
+    if (bk_config.disable_block_reuse
+    ||  bk_config.max_block_reuse_list <= 0) {
+
+        BK_ASSERT(heap->reuse_list == NULL,
+                  "config says we aren't reusing blocks, but reuse_list != NULL");
+
+        bk_release_block(block);
+    } else {
+        bk_spin_lock(&heap->reuse_list_lock);
+
+        block->meta.next = heap->reuse_list;
+        heap->reuse_list = block;
+
+        heap->reuse_list_len += 1;
+
+        if (heap->reuse_list_len > (u32)bk_config.max_block_reuse_list) {
+            b    = heap->reuse_list;
+            prev = NULL;
+            while (b->meta.next != NULL) {
+                prev = b;
+                b    = b->meta.next;
+            }
+
+            if (prev == NULL) {
+                heap->reuse_list = NULL;
+            } else {
+                prev->meta.next = NULL;
+            }
+
+            bk_release_block(b);
+
+            heap->reuse_list_len -= 1;
+        }
+
+        bk_spin_unlock(&heap->reuse_list_lock);
+    }
+
 }
 
 static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int zero_mem, bk_Block **blockp) {
-    void     *last_big;
     u64       request_size;
-    bk_Block *block;
     u8       *mem_start;
     void     *aligned;
+    bk_Block *block;
     bk_Chunk *chunk;
 
 
@@ -2315,32 +2424,14 @@ static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int
     BK_ASSERT(alignment <= BK_BLOCK_ALIGN / 2,
               "alignment is too large");
 
-
-    last_big = heap->last_big;
-    if (last_big != NULL && IS_ALIGNED(last_big, alignment)) {
-        chunk = CHUNK_FROM_USER_MEM(heap->last_big);
-        if (chunk->header.big_size >= n_bytes) {
-            if (CAS(&heap->last_big, last_big, NULL)) {
-                if (zero_mem) {
-                    memset(last_big, 0, n_bytes);
-                }
-                return last_big;
-            }
-        }
-    }
-
     n_bytes = ALIGN_UP(n_bytes, PAGE_SIZE) + PAGE_SIZE;
 
     /* Ask for memory twice the desired size so that we can get aligned memory. */
     request_size = MAX(n_bytes, alignment) << 1ULL;
 
-    block = bk_make_block(heap, BK_BIG_ALLOC_SIZE_CLASS_IDX, MAX(request_size, BK_BLOCK_SIZE));
-
-    *blockp = block;
-
+    *blockp   = block = bk_get_block(heap, BK_BIG_ALLOC_SIZE_CLASS_IDX, MAX(request_size, BK_BLOCK_SIZE));
     mem_start = block->_chunk_space;
-
-    aligned = ALIGN_UP(mem_start, alignment);
+    aligned   = ALIGN_UP(mem_start, alignment);
 
     BK_ASSERT(ADDR_PARENT_BLOCK(aligned) == block,
               "big allocation too far from block start");
@@ -2349,11 +2440,16 @@ static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int
               "big alloc doesn't fit in its block");
 
     chunk = (bk_Chunk*)((u8*)aligned - sizeof(bk_Chunk));
+    chunk->header.big_magic = BK_CHUNK_MAGIC;
     chunk->header.big_flags = BK_CHUNK_IS_BIG;
     chunk->header.big_size  = (u8*)block->meta.end - (u8*)aligned;
 
     BK_ASSERT((u8*)chunk >= block->_chunk_space,
               "chunk too low in block");
+
+    if (block->meta.has_been_reused && zero_mem) {
+        memset(aligned, 0, n_bytes);
+    }
 
     if (bk_config.log_big) {
         bk_logf("big-alloc 0x%X size %U align %U\n", aligned, n_bytes, alignment);
@@ -2363,9 +2459,10 @@ static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int
 }
 
 static inline void bk_big_free(bk_Heap *heap, bk_Block *block, void *addr) {
-    if (!CAS(&heap->last_big, NULL, addr)) {
-        bk_release_block(block);
-    }
+    BK_ASSERT(CHUNK_FROM_USER_MEM(addr)->header.big_magic == BK_CHUNK_MAGIC,
+              "big free bad magic");
+
+    bk_remove_block(heap, block);
 
     if (bk_config.log_big) {
         bk_logf("big-free 0x%X\n", addr);
@@ -2376,9 +2473,10 @@ BK_ALWAYS_INLINE
 static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes, u64 alignment) {
     bk_Chunk *chunk;
     void     *addr;
-    void     *aligned;
     void     *end;
+    void     *aligned;
     void     *used_end;
+    void     *potential_next;
     bk_Chunk *next;
     bk_Chunk *split;
 
@@ -2386,45 +2484,94 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
               "n_bytes is not aligned to MIN_ALIGN");
     n_bytes += MIN_ALIGN - sizeof(bk_Chunk);
 
+    BK_ASSERT(n_bytes <= block->meta.size_class,
+              "n_bytes too large");
+
     chunk = BK_BLOCK_FIRST_CHUNK(block);
 
     while (chunk != NULL) {
         if (chunk->header.flags & BK_CHUNK_IS_FREE) {
-            addr     = CHUNK_USER_MEM(chunk);
-            aligned  = IS_ALIGNED(addr, alignment) ? addr : ALIGN_UP(addr, alignment);
-            end      = (void*)((u8*)addr + chunk->header.size);
+            addr    = CHUNK_USER_MEM(chunk);
+            end     = (void*)((u8*)addr + chunk->header.size);
+            aligned = addr;
+
+            if (!IS_ALIGNED(aligned, alignment)) {
+                aligned = (u8*)aligned + sizeof(bk_Chunk) + block->meta.size_class;
+                if (!IS_ALIGNED(aligned, alignment)) {
+                    aligned = ALIGN_UP(aligned, alignment);
+                }
+            }
+
             used_end = (u8*)aligned + n_bytes;
 
             if ((u8*)used_end <= (u8*)end) {
-                if ((u64)((u8*)end - (u8*)used_end) >= sizeof(bk_Chunk) + block->meta.size_class) {
-                    next  = CHUNK_NEXT(chunk);
-                    split = CHUNK_FROM_USER_MEM(ALIGN_UP((u8*)used_end + sizeof(bk_Chunk), MIN_ALIGN));
+                next = CHUNK_NEXT(chunk);
+
+                if (aligned != addr) {
+                    BK_ASSERT((u64)((u8*)aligned - (u8*)addr) >= sizeof(bk_Chunk) + block->meta.size_class,
+                              "aligned doesn't leave enough space to split");
+
+                    split = CHUNK_FROM_USER_MEM(aligned);
+
+                    split->header.magic       = BK_CHUNK_MAGIC;
+                    split->header.flags       = BK_CHUNK_IS_FREE;
+                    split->header.size        = (u8*)end - (u8*)aligned;
+                    split->header.offset_next = next == NULL
+                                                    ? 0
+                                                    : CHUNK_DISTANCE(next, split);
+                    chunk->header.offset_next = CHUNK_DISTANCE(split, chunk);
+                    chunk->header.size        = (u8*)split - (u8*)addr;
+
+                    BK_ASSERT(CHUNK_NEXT(chunk) == split,
+                              "bad split link left");
+                    BK_ASSERT((u8*)chunk + sizeof(bk_Chunk) + chunk->header.size == (u8*)split,
+                              "bad split left size");
+                    BK_ASSERT(next == NULL || CHUNK_NEXT(split) == next,
+                              "bad split right");
+                    BK_ASSERT(next == NULL || (u8*)split + sizeof(bk_Chunk) + split->header.size == (u8*)next,
+                              "bad split right size");
+                    BK_ASSERT(next != NULL || (u8*)split + sizeof(bk_Chunk) + split->header.size == block->_chunk_space + BK_CHUNK_SPACE,
+                              "right split has no next, but doesn't span rest of chunk space");
+                    BK_ASSERT(chunk->header.size >= block->meta.size_class,
+                              "left split too small");
+                    BK_ASSERT(split->header.size >= block->meta.size_class,
+                              "right split too small");
+
+                    chunk = split;
+                }
+
+                potential_next = ALIGN_UP((u8*)used_end, MIN_ALIGN);
+
+                if ((u8*)potential_next > (u8*)end
+                &&  (u64)((u8*)end - (u8*)potential_next) >= block->meta.size_class) {
+
+                    split = CHUNK_FROM_USER_MEM(potential_next);
 
                     BK_ASSERT(split > chunk,
                               "bad split point");
 
                     if (next != NULL) {
                         split->header.offset_next = CHUNK_DISTANCE(next, split);
-                        next->header.offset_prev  = CHUNK_DISTANCE(next, split);
                     } else {
                         split->header.offset_next = 0;
                     }
 
-                    split->header.size        = ((u8*)end - (u8*)CHUNK_USER_MEM(split));
-                    split->header.offset_prev = CHUNK_DISTANCE(split, chunk);
+                    split->header.magic       = BK_CHUNK_MAGIC;
+                    split->header.flags       = BK_CHUNK_IS_FREE;
+                    split->header.size        = ((u8*)end - (u8*)potential_next);
                     chunk->header.offset_next = CHUNK_DISTANCE(split, chunk);
-                    chunk->header.size        = ((u8*)(void*)split - (u8*)CHUNK_USER_MEM(chunk));
+                    chunk->header.size        = ((u8*)split - (u8*)CHUNK_USER_MEM(chunk));
 
-                    BK_ASSERT(chunk->header.size >= n_bytes,
-                              "split made chunk too small");
                     BK_ASSERT((u8*)chunk + sizeof(bk_Chunk) + chunk->header.size == (u8*)split,
-                              "bad split left");
+                              "bad split left size");
                     BK_ASSERT((u8*)split + sizeof(bk_Chunk) + split->header.size == (u8*)end,
-                              "bad split right");
+                              "bad split right size");
                     BK_ASSERT(CHUNK_NEXT(chunk) == split,
-                              "bad split link");
+                              "bad split link right");
                     BK_ASSERT(next != NULL || (u8*)split + sizeof(bk_Chunk) + split->header.size == block->_chunk_space + BK_CHUNK_SPACE,
                               "right split has no next, but doesn't span rest of chunk space");
+                    BK_ASSERT(split->header.size >= block->meta.size_class,
+                              "right split too small");
                 }
 
                 chunk->header.flags &= ~BK_CHUNK_IS_FREE;
@@ -2447,6 +2594,8 @@ BK_ALWAYS_INLINE
 static inline void bk_free_chunk(bk_Heap *heap, bk_Block *block, bk_Chunk *chunk) {
     BK_ASSERT(!(chunk->header.flags & BK_CHUNK_IS_FREE),
               "double free");
+    BK_ASSERT(chunk->header.magic == BK_CHUNK_MAGIC,
+              "free'd address not from bkmalloc chunk");
     chunk->header.flags |= BK_CHUNK_IS_FREE;
 }
 
@@ -2515,19 +2664,6 @@ static inline void * bk_alloc_from_block(bk_Heap *heap, bk_Block *block, u64 n_b
     void     *mem;
     bk_Chunk *chunk;
 
-    /* From slots? */
-    if (!bk_config.disable_slots) {
-        if (block->meta.size_class - n_bytes < CACHE_LINE
-        &&  likely(alignment <= block->meta.size_class)) {
-            if ((mem = bk_alloc_slot(heap, block))) { goto out; }
-        }
-    }
-
-    /* Use a chunk? */
-    if (!bk_config.disable_chunks) {
-        if ((mem = bk_alloc_chunk(heap, block, n_bytes, alignment))) { goto out; }
-    }
-
     /* From bump space? */
     if (!bk_config.disable_bump) {
         mem = ALIGN_UP(block->meta.bump, MAX(MIN_ALIGN, alignment));
@@ -2541,6 +2677,19 @@ static inline void * bk_alloc_from_block(bk_Heap *heap, bk_Block *block, u64 n_b
             goto out;
         }
         mem = NULL;
+    }
+
+    /* From slots? */
+    if (!bk_config.disable_slots) {
+        if (block->meta.size_class - n_bytes < CACHE_LINE
+        &&  likely(alignment <= block->meta.size_class)) {
+            if ((mem = bk_alloc_slot(heap, block))) { goto out; }
+        }
+    }
+
+    /* Use a chunk? */
+    if (!bk_config.disable_chunks) {
+        if ((mem = bk_alloc_chunk(heap, block, n_bytes, alignment))) { goto out; }
     }
 
 out:;
@@ -2608,44 +2757,58 @@ out:;
 }
 
 static inline void bk_gc_block(bk_Heap *heap, bk_Block *block) {
+    int       chunks_used;
     bk_Chunk *chunk;
     bk_Chunk *next;
+    bk_Chunk *next_next;
 
     BK_ASSERT(heap->block_list_locks[block->meta.size_class_idx].val == BK_SPIN_LOCKED,
               "lock not held");
 
-    chunk = BK_BLOCK_FIRST_CHUNK(block);
+    chunks_used = 0;
+    chunk       = BK_BLOCK_FIRST_CHUNK(block);
+
+    BK_ASSERT(chunk->header.magic == BK_CHUNK_MAGIC,
+              "chunk bad magic");
+
     while (CHUNK_HAS_NEXT(chunk)) {
         next = CHUNK_NEXT(chunk);
 
+        BK_ASSERT(next->header.magic == BK_CHUNK_MAGIC,
+                  "next bad magic");
+
         if (chunk->header.flags & next->header.flags & BK_CHUNK_IS_FREE) {
-            chunk->header.size += sizeof(bk_Chunk) + next->header.size;
-            if (next->header.offset_next == 0) {
+            next_next = CHUNK_NEXT(next);
+
+            BK_ASSERT(next->header.magic == BK_CHUNK_MAGIC,
+                      "next_next bad magic");
+
+            chunk->header.size = CHUNK_DISTANCE(next, chunk) + sizeof(bk_Chunk) + next->header.size;
+
+            if (next_next == NULL) {
                 chunk->header.offset_next = 0;
             } else {
-                chunk->header.offset_next = sizeof(bk_Chunk) + chunk->header.size;
-                BK_ASSERT(CHUNK_NEXT(chunk) == next,
-                          "bad coalesce patch");
+                chunk->header.offset_next = CHUNK_DISTANCE(next_next, chunk);
             }
         } else {
-            chunk = next;
+            chunks_used = 1;
+            chunk       = next;
         }
+
+        chunk = next;
+    }
+
+    if (!(chunk->header.flags & BK_CHUNK_IS_FREE)) {
+        chunks_used = 1;
     }
 
     /* Can we release this block? */
-    if (block->slots.n_allocations == 0
+    if (!chunks_used
+    &&  block->slots.n_allocations == 0
     &&  block->meta.n_bump == block->meta.n_bump_free) {
 
-        chunk = BK_BLOCK_FIRST_CHUNK(block);
-        if (chunk->header.flags & BK_CHUNK_IS_FREE
-        &&  CHUNK_NEXT(chunk) == NULL) {
-
-            BK_ASSERT((u8*)chunk + sizeof(bk_Chunk) + chunk->header.size == block->_chunk_space + BK_CHUNK_SPACE,
-                      "lone chunk does not span entire chunk space");
-
-            bk_remove_block(heap, block);
-            return;
-        }
+        bk_remove_block(heap, block);
+        return;
     }
 
     if (block->meta.n_bump == block->meta.n_bump_free) {
@@ -2661,6 +2824,17 @@ static inline void bk_gc_heap(bk_Heap *heap) {
     if (bk_config.log_gc) {
         bk_logf("gc-heap %u\n", heap->hid);
     }
+
+    bk_spin_lock(&heap->reuse_list_lock);
+    block = heap->reuse_list;
+    while (block != NULL) {
+        next = block->meta.next;
+        bk_release_block(block);
+        block = next;
+    }
+    heap->reuse_list     = NULL;
+    heap->reuse_list_len = 0;
+    bk_spin_unlock(&heap->reuse_list_lock);
 
     for (i = 0; i < BK_NR_SIZE_CLASSES; i += 1) {
         bk_spin_lock(&heap->block_list_locks[i]);
@@ -2711,7 +2885,10 @@ static inline void bk_heap_free(bk_Heap *heap, void *addr) {
 
 
         fc = FAA(&heap->free_count, 1);
-        if (fc >= (u32)bk_config.gc_free_threshold) {
+
+        if (!bk_config.disable_gc
+        &&  fc >= (u32)bk_config.gc_free_threshold) {
+
             bk_gc_heap(heap);
         }
     }
@@ -2753,9 +2930,10 @@ static char *bk_istrdup(const char *s) {
 /******************************* @@threads *******************************/
 
 typedef struct {
-    bk_Heap heap;
-    u32     cpuid;
-    int     is_valid;
+    bk_Heap     *heap;
+    bk_Spinlock  lock;
+    u32          cpuid;
+    int          is_valid;
 } bk_Thread_Data;
 
 
@@ -2765,8 +2943,9 @@ static THREAD_LOCAL bk_Thread_Data *_bk_local_thr;
 static inline void bk_init_threads(void) {
     u32 nr_cpus;
 
-    nr_cpus          = bk_get_nr_cpus();
-    _bk_thread_datas = (bk_Thread_Data*)bk_imalloc(nr_cpus * sizeof(bk_Thread_Data));
+    _bk_main_thread_cpu = bk_getcpu();
+    nr_cpus             = bk_get_nr_cpus();
+    _bk_thread_datas    = (bk_Thread_Data*)bk_imalloc(nr_cpus * sizeof(bk_Thread_Data));
 }
 
 BK_ALWAYS_INLINE
@@ -2777,14 +2956,27 @@ static inline bk_Heap *bk_get_this_thread_heap(void) {
         cpu           = bk_getcpu();
         _bk_local_thr = &_bk_thread_datas[cpu];
 
+        bk_spin_lock(&_bk_local_thr->lock);
+
         if (!_bk_local_thr->is_valid) {
-            bk_init_heap(&_bk_local_thr->heap, BK_HEAP_THREAD);
+            if (cpu == _bk_main_thread_cpu) {
+                _bk_local_thr->heap = bk_global_heap;
+            } else {
+                _bk_local_thr->heap = (bk_Heap*)bk_imalloc(sizeof(bk_Heap));
+                bk_init_heap(_bk_local_thr->heap, BK_HEAP_THREAD);
+            }
+
+            BK_ASSERT(_bk_local_thr->heap != NULL,
+                      "did not get thread heap");
+
             _bk_local_thr->cpuid    = cpu;
             _bk_local_thr->is_valid = 1;
         }
+
+        bk_spin_unlock(&_bk_local_thr->lock);
     }
 
-    return &(_bk_local_thr->heap);
+    return _bk_local_thr->heap;
 }
 
 /******************************* @@init *******************************/
@@ -2850,16 +3042,14 @@ static inline void bk_init(void) {
 extern "C" {
 #endif /* __cplusplus */
 
-#define GET_HEAP(_size)                                           \
-    (((_size) <= CACHE_LINE || unlikely(!bk_is_initialized || !bk_config.per_thread_heaps)) \
-        ? bk_global_heap                                          \
-        : bk_get_this_thread_heap())
-
 BK_ALWAYS_INLINE
 static inline void * _bk_alloc(u64 n_bytes, u64 alignment, int zero_mem) {
     bk_Heap *heap;
 
-    heap = GET_HEAP(n_bytes);
+    heap = unlikely(!bk_is_initialized || !bk_config.per_thread_heaps)
+            ? bk_global_heap
+            : bk_get_this_thread_heap();
+
     return bk_heap_alloc(heap, n_bytes, alignment, zero_mem);
 }
 
