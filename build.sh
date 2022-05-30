@@ -8,15 +8,16 @@
 ### OPT
     LTO="-flto"
     MARCHTUNE="-march=native -mtune=native"
+    OPT_PASSES="-funroll-loops"
     LEVEL="-O3"
 #     LEVEL="-O0"
 
-    OPT="${LEVEL} ${MARCHTUNE} ${LTO}"
+    OPT="${LEVEL} ${OPT_PASSES} ${MARCHTUNE} ${LTO}"
 
 ### FEATURES
     MMAP_OVERRIDE="-DBK_MMAP_OVERRIDE"
     RETURN_ADDR="-DBK_RETURN_ADDR"
-    ASSERT="-DBK_DO_ASSERTIONS"
+#     ASSERT="-DBK_DO_ASSERTIONS"
     LOG="-DBK_DO_LOGGING"
 
     FEATURES="${MMAP_OVERRIDE} ${RETURN_ADDR} ${ASSERT} ${LOG}"
@@ -31,4 +32,4 @@ echo ${COMPILE}
 ${COMPILE} || exit $?
 COMPILE="g++ -shared -o libbkmalloc.so -x c++ bkmalloc.h -DBKMALLOC_IMPL ${CPP_FLAGS}"
 echo ${COMPILE}
-${COMPILE}
+${COMPILE} || exit $?
