@@ -1,7 +1,7 @@
 #ifndef __BKMALLOC_H__
 #define __BKMALLOC_H__
 
-#include <stddef.h>
+#include <stddef.h> /* size_t */
 
 struct bk_Heap;
 
@@ -1748,8 +1748,11 @@ typedef struct {
     u32         disable_chunks;
 /* HEAPS */
     u32         per_thread_heaps;
+    u32         main_thread_use_global;
+/* BLOCKS */
     u32         disable_block_reuse;
     s32         max_block_reuse_list;
+    s32         max_block_reuse_waste_kb;
 /* GARBAGE COLLECTION */
     s32         disable_gc;
     s32         gc_free_threshold;
@@ -1766,6 +1769,7 @@ enum {
 enum {
     BK_OPT_LOGGING,
     BK_OPT_HEAPS,
+    BK_OPT_BLOCKS,
     BK_OPT_METHODS,
     BK_OPT_GARBAGE_COLLECTION,
     BK_NR_OPT_CATEGORIES,
@@ -1774,6 +1778,7 @@ enum {
 static const char *bk_opt_category_strings[] = {
     "LOGGING",
     "HEAPS",
+    "BLOCKS",
     "METHODS",
     "GARBAGE COLLECTION",
 };
@@ -1921,14 +1926,24 @@ static int bk_init_config(void) {
                                                  "Use per-(hardware)thread heaps to limit lock contention.",
                                                  &bk_config.per_thread_heaps);
                                                  bk_opt_default_bool("per-thread-heaps", 1);
-    bk_option("disable-block-reuse",             BK_OPT_BOOL, BK_OPT_HEAPS,
+    bk_option("main-thread-use-global",          BK_OPT_BOOL, BK_OPT_HEAPS,
+                                                 "When set, the main thread uses the global heap instead of creating a new thread-specific one."
+                                                 " Other threads create new heaps as normal.",
+                                                 &bk_config.main_thread_use_global);
+                                                 bk_opt_default_bool("main-thread-use-global", 1);
+/* BLOCKS */
+    bk_option("disable-block-reuse",             BK_OPT_BOOL, BK_OPT_BLOCKS,
                                                  "Don't maintain the block-reuse list and always allocate new blocks.",
                                                  &bk_config.disable_block_reuse);
                                                  bk_opt_default_bool("disable-block-reuse", 0);
-    bk_option("max-block-reuse-list",            BK_OPT_INT, BK_OPT_HEAPS,
-                                                 "Maximum number of blocks in each heap kept unreleased as a cache for new requests.",
+    bk_option("max-block-reuse-list",            BK_OPT_INT, BK_OPT_BLOCKS,
+                                                 "Maximum number of blocks kept unreleased as a cache for new requests.",
                                                  &bk_config.max_block_reuse_list);
-                                                 bk_opt_default_int("max-block-reuse-list", 4);
+                                                 bk_opt_default_int("max-block-reuse-list", 8);
+    bk_option("max-block-reuse-waste-kb",        BK_OPT_INT, BK_OPT_BLOCKS,
+                                                 "Only reuse a block if doing so wastes less than this number of kilobytes.",
+                                                 &bk_config.max_block_reuse_waste_kb);
+                                                 bk_opt_default_int("max-block-reuse-waste-kb", 512);
 /* GARBAGE COLLECTION */
     bk_option("disable-gc",                      BK_OPT_BOOL, BK_OPT_GARBAGE_COLLECTION,
                                                  "Do not perform garbage collection on heaps.",
@@ -2107,16 +2122,18 @@ union bk_Block;
 typedef struct PACKED {
     struct bk_Heap *heap;
     void           *end;
+    u64             size;
     union bk_Block *next;
     u32             size_class;
     u32             log2_size_class;
     u32             size_class_idx;
+    u32             all_chunks_used;
     void           *bump_base;
     void           *bump;
     u32             n_bump;
     u32             n_bump_free;
     u32             has_been_reused;
-    u8              _pad1[8];
+    u8              _pad1[0];
 } bk_Block_Metadata;
 
 #define BK_CHUNK_SPACE ((2 * BK_MAX_BLOCK_ALLOC_SIZE) - sizeof(bk_Block_Metadata) - sizeof(bk_Slots))
@@ -2139,6 +2156,11 @@ typedef union PACKED bk_Block {
     ((bk_Chunk*)((_block)->_bytes + offsetof(bk_Block, _chunk_space)))
 
 
+bk_Spinlock  bk_reuse_list_lock;
+u32          bk_reuse_list_len;
+bk_Block    *bk_reuse_list;
+
+
 /******************************* @@heaps *******************************/
 
 /*
@@ -2158,9 +2180,6 @@ typedef struct bk_Heap {
     u32          hid;
     bk_Spinlock  block_list_locks[BK_NR_SIZE_CLASSES];
     bk_Block    *block_lists[BK_NR_SIZE_CLASSES];
-    bk_Spinlock  reuse_list_lock;
-    u32          reuse_list_len;
-    bk_Block    *reuse_list;
     u32          free_count;
 } bk_Heap;
 
@@ -2230,6 +2249,7 @@ static inline void bk_reset_block(bk_Block *block, bk_Heap *heap, u32 size_class
 
     block->meta.heap = heap;
     block->meta.end  = ((u8*)block) + size;
+    block->meta.size = size;
     block->meta.bump = NULL;
 
     block->meta.size_class_idx = size_class_idx;
@@ -2247,6 +2267,7 @@ static inline void bk_reset_block(bk_Block *block, bk_Heap *heap, u32 size_class
         first_chunk->header.size        = BK_CHUNK_SPACE - sizeof(bk_Chunk);
         first_chunk->header.flags       = BK_CHUNK_IS_FREE;
 
+        memset((void*)&block->slots, 0, sizeof(block->slots));
         block->slots.max_allocations = MIN(BK_SLOT_SPACE >> block->meta.log2_size_class, 4096ULL);
 
         block->meta.bump_base = block->_slot_space + block->meta.size_class * block->slots.max_allocations;
@@ -2278,44 +2299,102 @@ static inline bk_Block * bk_make_block(bk_Heap *heap, u32 size_class_idx, u64 si
     return block;
 }
 
+#ifdef BK_DO_ASSERTIONS
+static int bk_verify_reuse_list(void) {
+    u32       count;
+    bk_Block *block;
+
+    BK_ASSERT(bk_reuse_list_lock.val == BK_SPIN_LOCKED,
+              "reuse_list_lock not held");
+
+    if (bk_reuse_list_len > (u32)bk_config.max_block_reuse_list) {
+        BK_ASSERT(0,
+                  "reuse_list_len too large");
+        return 0;
+    }
+
+    count = 0;
+    block = bk_reuse_list;
+    while (block != NULL) {
+        count += 1;
+        block = block->meta.next;
+    }
+
+    if (count != bk_reuse_list_len) {
+        BK_ASSERT(0,
+                  "reuse_list length does not match reuse_list_len");
+        return 0;
+    }
+
+    return 1;
+}
+#endif
+
 BK_ALWAYS_INLINE
 static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 size) {
     bk_Block *block;
     bk_Block *prev;
+    bk_Block *best_fit;
+    bk_Block *best_fit_prev;
 
-    bk_spin_lock(&heap->reuse_list_lock);
-    BK_ASSERT(heap->reuse_list_len <= (u32)bk_config.max_block_reuse_list,
-              "reuse_list too big");
-    block = heap->reuse_list;
-    prev  = NULL;
-    while (block != NULL) {
-        if (((u64)((u8*)block->meta.end - (u8*)block)) >= size) {
-            if (prev == NULL) {
-                heap->reuse_list = block->meta.next;
-            } else {
-                prev->meta.next = block->meta.next;
-            }
-            heap->reuse_list_len -= 1;
-            bk_spin_unlock(&heap->reuse_list_lock);
+    if (!bk_config.disable_block_reuse) {
+        bk_spin_lock(&bk_reuse_list_lock);
 
-            bk_reset_block(block, heap, size_class_idx, size);
+        BK_ASSERT(bk_reuse_list_len <= (u32)bk_config.max_block_reuse_list,
+                "reuse_list too big");
 
-            block->meta.has_been_reused = 1;
+        block         = bk_reuse_list;
+        prev          = NULL;
+        best_fit      = NULL;
+        best_fit_prev = NULL;
 
-            if (bk_config.log_blocks) {
-                if (block->meta.size_class == BK_BIG_ALLOC_SIZE_CLASS) {
-                    bk_logf("block-reuse 0x%X - 0x%X size_class BIG\n", block, block->meta.end);
-                } else {
-                    bk_logf("block-reuse 0x%X - 0x%X size_class %U\n", block, block->meta.end, block->meta.size_class);
+        while (block != NULL) {
+            if (block->meta.size >= size) {
+                if (best_fit == NULL
+                ||  block->meta.size < best_fit->meta.size) {
+
+                    best_fit      = block;
+                    best_fit_prev = prev;
+
+                    if (block->meta.size == size) { break; }
                 }
             }
 
-            return block;
+            prev  = block;
+            block = block->meta.next;
         }
-        prev  = block;
-        block = block->meta.next;
+
+        if (best_fit != NULL) {
+            if (best_fit->meta.size - size <= KB((u32)bk_config.max_block_reuse_waste_kb)) {
+                if (best_fit_prev == NULL) {
+                    bk_reuse_list = best_fit->meta.next;
+                } else {
+                    best_fit_prev->meta.next = best_fit->meta.next;
+                }
+                bk_reuse_list_len -= 1;
+
+                BK_ASSERT(bk_verify_reuse_list(), "bad reuse list");
+
+                bk_spin_unlock(&bk_reuse_list_lock);
+
+                bk_reset_block(best_fit, heap, size_class_idx, size);
+
+                best_fit->meta.has_been_reused = 1;
+
+                if (bk_config.log_blocks) {
+                    if (best_fit->meta.size_class == BK_BIG_ALLOC_SIZE_CLASS) {
+                        bk_logf("block-reuse 0x%X - 0x%X size_class BIG\n", best_fit, best_fit->meta.end);
+                    } else {
+                        bk_logf("block-reuse 0x%X - 0x%X size_class %U\n", best_fit, best_fit->meta.end, best_fit->meta.size_class);
+                    }
+                }
+
+                return best_fit;
+            }
+        }
+
+        bk_spin_unlock(&bk_reuse_list_lock);
     }
-    bk_spin_unlock(&heap->reuse_list_lock);
 
     return bk_make_block(heap, size_class_idx, size);
 }
@@ -2375,20 +2454,20 @@ static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
     if (bk_config.disable_block_reuse
     ||  bk_config.max_block_reuse_list <= 0) {
 
-        BK_ASSERT(heap->reuse_list == NULL,
+        BK_ASSERT(bk_reuse_list == NULL,
                   "config says we aren't reusing blocks, but reuse_list != NULL");
 
         bk_release_block(block);
     } else {
-        bk_spin_lock(&heap->reuse_list_lock);
+        bk_spin_lock(&bk_reuse_list_lock);
 
-        block->meta.next = heap->reuse_list;
-        heap->reuse_list = block;
+        block->meta.next = bk_reuse_list;
+        bk_reuse_list = block;
 
-        heap->reuse_list_len += 1;
+        bk_reuse_list_len += 1;
 
-        if (heap->reuse_list_len > (u32)bk_config.max_block_reuse_list) {
-            b    = heap->reuse_list;
+        if (bk_reuse_list_len > (u32)bk_config.max_block_reuse_list) {
+            b    = bk_reuse_list;
             prev = NULL;
             while (b->meta.next != NULL) {
                 prev = b;
@@ -2396,17 +2475,19 @@ static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
             }
 
             if (prev == NULL) {
-                heap->reuse_list = NULL;
+                bk_reuse_list = NULL;
             } else {
                 prev->meta.next = NULL;
             }
 
             bk_release_block(b);
 
-            heap->reuse_list_len -= 1;
+            bk_reuse_list_len -= 1;
         }
 
-        bk_spin_unlock(&heap->reuse_list_lock);
+        BK_ASSERT(bk_verify_reuse_list(), "bad reuse list");
+
+        bk_spin_unlock(&bk_reuse_list_lock);
     }
 
 }
@@ -2587,6 +2668,9 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
         chunk = CHUNK_NEXT(chunk);
     }
 
+/*     block->meta.all_chunks_used = 1; */
+/*     CAS(&block->meta.all_chunks_used, 0, 1); */
+
     return NULL;
 }
 
@@ -2597,6 +2681,9 @@ static inline void bk_free_chunk(bk_Heap *heap, bk_Block *block, bk_Chunk *chunk
     BK_ASSERT(chunk->header.magic == BK_CHUNK_MAGIC,
               "free'd address not from bkmalloc chunk");
     chunk->header.flags |= BK_CHUNK_IS_FREE;
+
+/*     block->meta.all_chunks_used = 0; */
+/*     CAS(&block->meta.all_chunks_used, 1, 0); */
 }
 
 BK_ALWAYS_INLINE
@@ -2664,6 +2751,24 @@ static inline void * bk_alloc_from_block(bk_Heap *heap, bk_Block *block, u64 n_b
     void     *mem;
     bk_Chunk *chunk;
 
+    BK_ASSERT(heap->block_list_locks[block->meta.size_class_idx].val == BK_SPIN_LOCKED,
+              "block list lock is not held");
+
+    /* From slots? */
+    if (!bk_config.disable_slots) {
+        if (block->meta.size_class - n_bytes < CACHE_LINE
+        &&  likely(alignment <= block->meta.size_class)) {
+            if ((mem = bk_alloc_slot(heap, block))) { goto out; }
+        }
+    }
+
+    /* Use a chunk? */
+    if (!bk_config.disable_chunks) {
+/*         if (!block->meta.all_chunks_used */
+/*         &&  (mem = bk_alloc_chunk(heap, block, n_bytes, alignment))) { goto out; } */
+        if ((mem = bk_alloc_chunk(heap, block, n_bytes, alignment))) { goto out; }
+    }
+
     /* From bump space? */
     if (!bk_config.disable_bump) {
         mem = ALIGN_UP(block->meta.bump, MAX(MIN_ALIGN, alignment));
@@ -2677,19 +2782,6 @@ static inline void * bk_alloc_from_block(bk_Heap *heap, bk_Block *block, u64 n_b
             goto out;
         }
         mem = NULL;
-    }
-
-    /* From slots? */
-    if (!bk_config.disable_slots) {
-        if (block->meta.size_class - n_bytes < CACHE_LINE
-        &&  likely(alignment <= block->meta.size_class)) {
-            if ((mem = bk_alloc_slot(heap, block))) { goto out; }
-        }
-    }
-
-    /* Use a chunk? */
-    if (!bk_config.disable_chunks) {
-        if ((mem = bk_alloc_chunk(heap, block, n_bytes, alignment))) { goto out; }
     }
 
 out:;
@@ -2790,6 +2882,9 @@ static inline void bk_gc_block(bk_Heap *heap, bk_Block *block) {
             } else {
                 chunk->header.offset_next = CHUNK_DISTANCE(next_next, chunk);
             }
+
+            BK_ASSERT((u8*)chunk + sizeof(bk_Chunk) + chunk->header.size <= block->_chunk_space + BK_CHUNK_SPACE,
+                      "coalesce made chunk to large");
         } else {
             chunks_used = 1;
             chunk       = next;
@@ -2824,17 +2919,6 @@ static inline void bk_gc_heap(bk_Heap *heap) {
     if (bk_config.log_gc) {
         bk_logf("gc-heap %u\n", heap->hid);
     }
-
-    bk_spin_lock(&heap->reuse_list_lock);
-    block = heap->reuse_list;
-    while (block != NULL) {
-        next = block->meta.next;
-        bk_release_block(block);
-        block = next;
-    }
-    heap->reuse_list     = NULL;
-    heap->reuse_list_len = 0;
-    bk_spin_unlock(&heap->reuse_list_lock);
 
     for (i = 0; i < BK_NR_SIZE_CLASSES; i += 1) {
         bk_spin_lock(&heap->block_list_locks[i]);
@@ -2874,9 +2958,9 @@ static inline void bk_heap_free(bk_Heap *heap, void *addr) {
         if (addr >= block->meta.bump_base) {
             FAA(&block->meta.n_bump_free, 1);
         } else if (addr < (void*)&block->slots) {
-            bk_spin_lock(&heap->block_list_locks[block->meta.size_class_idx]);
+/*             bk_spin_lock(&heap->block_list_locks[block->meta.size_class_idx]); */
             bk_free_chunk(heap, block, CHUNK_FROM_USER_MEM(addr));
-            bk_spin_unlock(&heap->block_list_locks[block->meta.size_class_idx]);
+/*             bk_spin_unlock(&heap->block_list_locks[block->meta.size_class_idx]); */
         } else {
             bk_spin_lock(&heap->block_list_locks[block->meta.size_class_idx]);
             bk_free_slot(heap, block, addr);
@@ -2959,7 +3043,7 @@ static inline bk_Heap *bk_get_this_thread_heap(void) {
         bk_spin_lock(&_bk_local_thr->lock);
 
         if (!_bk_local_thr->is_valid) {
-            if (cpu == _bk_main_thread_cpu) {
+            if (cpu == _bk_main_thread_cpu && bk_config.main_thread_use_global) {
                 _bk_local_thr->heap = bk_global_heap;
             } else {
                 _bk_local_thr->heap = (bk_Heap*)bk_imalloc(sizeof(bk_Heap));
