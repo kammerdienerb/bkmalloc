@@ -13,24 +13,17 @@ extern "C" {
 #define BK_THROW
 #endif /* __cplusplus */
 
-void * bk_heap_malloc(struct bk_Heap *heap, size_t n_bytes);
-void * bk_heap_calloc(struct bk_Heap *heap, size_t count, size_t n_bytes);
-void * bk_heap_realloc(struct bk_Heap *heap, void *addr, size_t n_bytes);
-void * bk_heap_reallocf(struct bk_Heap *heap, void *addr, size_t n_bytes);
-void * bk_heap_valloc(struct bk_Heap *heap, size_t n_bytes);
-void * bk_heap_pvalloc(struct bk_Heap *heap, size_t n_bytes);
-int    bk_heap_posix_memalign(struct bk_Heap *heap, void **memptr, size_t alignment, size_t size);
-void * bk_heap_aligned_alloc(struct bk_Heap *heap, size_t alignment, size_t size);
-void * bk_heap_memalign(struct bk_Heap *heap, size_t alignment, size_t size);
+struct bk_Heap *bk_heap(const char *name);
+void            bk_destroy_heap(const char *name);
 
-void * bk_malloc(size_t n_bytes);
-void * bk_calloc(size_t count, size_t n_bytes);
-void * bk_realloc(void *addr, size_t n_bytes);
-void * bk_reallocf(void *addr, size_t n_bytes);
-void * bk_valloc(size_t n_bytes);
+void * bk_malloc(struct bk_Heap *heap, size_t n_bytes);
+void * bk_calloc(struct bk_Heap *heap, size_t count, size_t n_bytes);
+void * bk_realloc(struct bk_Heap *heap, void *addr, size_t n_bytes);
+void * bk_reallocf(struct bk_Heap *heap, void *addr, size_t n_bytes);
+void * bk_valloc(struct bk_Heap *heap, size_t n_bytes);
 void   bk_free(void *addr);
-int    bk_posix_memalign(void **memptr, size_t alignment, size_t n_bytes);
-void * bk_aligned_alloc(size_t alignment, size_t size);
+int    bk_posix_memalign(struct bk_Heap *heap, void **memptr, size_t alignment, size_t n_bytes);
+void * bk_aligned_alloc(struct bk_Heap *heap, size_t alignment, size_t size);
 size_t bk_malloc_size(void *addr);
 
 void * malloc(size_t n_bytes) BK_THROW;
@@ -45,6 +38,7 @@ void * aligned_alloc(size_t alignment, size_t size) BK_THROW;
 void * memalign(size_t alignment, size_t size) BK_THROW;
 size_t malloc_size(void *addr) BK_THROW;
 size_t malloc_usable_size(void *addr) BK_THROW;
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */
@@ -83,6 +77,8 @@ void   operator delete[](void* ptr, std::align_val_t, const std::nothrow_t &) no
 void   operator delete[](void* ptr, std::size_t size, std::align_val_t al) noexcept;
 #endif
 
+#ifndef BKMALLOC_HOOK
+
 static inline void *
 bk_handle_OOM(std::size_t size, bool nothrow) {
     void *ptr;
@@ -109,7 +105,7 @@ bk_handle_OOM(std::size_t size, bool nothrow) {
             break;
         }
 
-        ptr = bk_malloc(size);
+        ptr = malloc(size);
     }
 
     if (ptr == nullptr && !nothrow) { std::__throw_bad_alloc(); }
@@ -122,7 +118,7 @@ static inline void *
 bk_new_impl(std::size_t size) noexcept(is_no_except) {
     void *ptr;
 
-    ptr = bk_malloc(size);
+    ptr = malloc(size);
     if (__builtin_expect(ptr != nullptr, 1)) { return ptr; }
 
     return bk_handle_OOM(size, is_no_except);
@@ -140,7 +136,7 @@ static inline void *
 bk_aligned_new_impl(std::size_t size, std::align_val_t alignment) noexcept(is_no_except) {
     void *ptr;
 
-    ptr = bk_aligned_alloc(static_cast<std::size_t>(alignment), size);
+    ptr = aligned_alloc(static_cast<std::size_t>(alignment), size);
 
     if (__builtin_expect(ptr != nullptr, 1)) {
         return ptr;
@@ -156,10 +152,10 @@ void * operator new[](std::size_t size, std::align_val_t alignment, const std::n
 
 #endif  /* __cpp_aligned_new */
 
-void operator delete(void *ptr) noexcept                           { bk_free(ptr); }
-void operator delete[](void *ptr) noexcept                         { bk_free(ptr); }
-void operator delete(void *ptr, const std::nothrow_t &) noexcept   { bk_free(ptr); }
-void operator delete[](void *ptr, const std::nothrow_t &) noexcept { bk_free(ptr); }
+void operator delete(void *ptr) noexcept                           { free(ptr); }
+void operator delete[](void *ptr) noexcept                         { free(ptr); }
+void operator delete(void *ptr, const std::nothrow_t &) noexcept   { free(ptr); }
+void operator delete[](void *ptr, const std::nothrow_t &) noexcept { free(ptr); }
 
 #if __cpp_sized_deallocation >= 201309
 
@@ -170,7 +166,7 @@ bk_sized_delete_impl(void* ptr, std::size_t size) noexcept {
     if (__builtin_expect(ptr == nullptr, 0)) {
         return;
     }
-    bk_free(ptr);
+    free(ptr);
 }
 
 void operator delete(void *ptr, std::size_t size) noexcept   { bk_sized_delete_impl(ptr, size); }
@@ -185,15 +181,17 @@ bk_aligned_sized_delete_impl(void* ptr, std::size_t size, std::align_val_t align
     if (__builtin_expect(ptr == nullptr, 0)) {
         return;
     }
-    bk_free(ptr);
+    free(ptr);
 }
 
-void operator delete(void* ptr, std::align_val_t) noexcept                               { bk_free(ptr);                                       }
-void operator delete[](void* ptr, std::align_val_t) noexcept                             { bk_free(ptr);                                       }
-void operator delete(void* ptr, std::align_val_t, const std::nothrow_t&) noexcept        { bk_free(ptr);                                       }
-void operator delete[](void* ptr, std::align_val_t, const std::nothrow_t&) noexcept      { bk_free(ptr);                                       }
+void operator delete(void* ptr, std::align_val_t) noexcept                               { free(ptr);                                          }
+void operator delete[](void* ptr, std::align_val_t) noexcept                             { free(ptr);                                          }
+void operator delete(void* ptr, std::align_val_t, const std::nothrow_t&) noexcept        { free(ptr);                                          }
+void operator delete[](void* ptr, std::align_val_t, const std::nothrow_t&) noexcept      { free(ptr);                                          }
 void operator delete(void* ptr, std::size_t size, std::align_val_t alignment) noexcept   { bk_aligned_sized_delete_impl(ptr, size, alignment); }
 void operator delete[](void* ptr, std::size_t size, std::align_val_t alignment) noexcept { bk_aligned_sized_delete_impl(ptr, size, alignment); }
+
+#endif /* BKMALLOC_HOOK */
 
 #endif  /* __cpp_aligned_new */
 #endif /* __cplusplus */
@@ -214,8 +212,6 @@ void operator delete[](void* ptr, std::size_t size, std::align_val_t alignment) 
 char *getenv(const char *name);
 void  exit(int status);
 
-
-
 #define MIN_ALIGN                   (16ULL)
 #define BK_BLOCK_SIZE               (MB(1))
 #define BK_BLOCK_ALIGN              (MB(1))
@@ -225,7 +221,9 @@ void  exit(int status);
 #define BK_BIG_ALLOC_SIZE_CLASS     (0xFFFFFFFF)
 #define BK_BIG_ALLOC_SIZE_CLASS_IDX (0xFFFFFFFF)
 
+#ifndef BKMALLOC_HOOK
 static inline void bk_init(void);
+#endif /* BKMALLOC_HOOK */
 
 
 /******************************* @@util *******************************/
@@ -347,9 +345,33 @@ static inline void bk_memzero(void *addr, u64 size) {
     __builtin_memset(__builtin_assume_aligned(addr, MIN_ALIGN), 0, size);
 }
 
+
+#ifndef BKMALLOC_HOOK
+
 static void *bk_imalloc(u64 n_bytes);
 static void  bk_ifree(void *addr);
 static char *bk_istrdup(const char *s);
+
+#endif /* BKMALLOC_HOOK */
+
+typedef const char *bk_str;
+
+BK_ALWAYS_INLINE
+static inline int bk_str_equ(bk_str a, bk_str b) {
+    return strcmp(a, b) == 0;
+}
+
+BK_ALWAYS_INLINE
+static inline u64 bk_str_hash(bk_str s) {
+    unsigned long hash = 5381;
+    int c;
+
+    while ((c = *s++))
+    hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+
+    return hash;
+}
+
 
 /******************************* @@platform *******************************/
 #if defined(unix) || defined(__unix__) || defined(__unix) || defined(__linux__) || defined(__APPLE__)
@@ -412,6 +434,16 @@ static inline u32 bk_getcpu(void) {
 }
 
 #if defined(BK_UNIX)
+static inline void *bk_open_library_unix(const char *path) {
+    return dlopen(path, RTLD_NOW);
+}
+
+static inline void *bk_library_symbol_unix(void *lib_handle, const char *name) {
+    return dlsym(lib_handle, name);
+}
+#endif
+
+#if defined(BK_UNIX)
 static inline void * bk_get_pages_unix(u64 n_pages) {
     u64   desired_size;
     void *pages;
@@ -446,17 +478,46 @@ static inline void bk_release_pages_unix(void *addr, u64 n_pages) {
               "munmap() failed");
 }
 
+static inline void bk_decommit_pages_unix(void *addr, u64 n_pages) {
+    int err;
+
+    (void)err;
+
+    err = madvise(addr, n_pages * PAGE_SIZE, MADV_DONTNEED);
+
+    BK_ASSERT(err == 0,
+              "munmap() failed");
+}
+
 #elif defined(BK_WIN)
 #error "Windows is not supported yet."
 
-static inline void * bk_get_pages_win(u64 n_pages)                 { return NULL; }
-static inline void   bk_release_pages_win(void *addr, u64 n_pages) {              }
+static inline void * bk_open_library_win(const char *path)                     { return NULL; }
+static inline void * bk_library_symbol_win(void *lib_handle, const char *name) { return NULL; }
+static inline void * bk_get_pages_win(u64 n_pages)                             { return NULL; }
+static inline void   bk_release_pages_win(void *addr, u64 n_pages)             {              }
+static inline void   bk_decommit_pages_win(void *addr, u64 n_pages)            {              }
 
 #else
 #error "Unknown platform."
 #endif
 
 
+static inline void * bk_open_library(const char *path) {
+#if defined(BK_UNIX)
+    return bk_open_library_unix(path);
+#else
+    #error "platform missing implementation"
+#endif
+}
+
+static inline void * bk_library_symbol(void *lib_handle, const char *name) {
+#if defined(BK_UNIX)
+    return bk_library_symbol_unix(lib_handle, name);
+#else
+    #error "platform missing implementation"
+#endif
+}
 
 static inline void * bk_get_pages(u64 n_pages) {
     void *pages;
@@ -479,6 +540,17 @@ static inline void bk_release_pages(void *addr, u64 n_pages) {
 
 #if defined(BK_UNIX)
     bk_release_pages_unix(addr, n_pages);
+#elif defined(BK_WIN)
+    #error "need Windows release_pages"
+#endif
+}
+
+static inline void bk_decommit_pages(void *addr, u64 n_pages) {
+    BK_ASSERT(n_pages > 0,
+              "n_pages is zero");
+
+#if defined(BK_UNIX)
+    bk_decommit_pages_unix(addr, n_pages);
 #elif defined(BK_WIN)
     #error "need Windows release_pages"
 #endif
@@ -784,7 +856,387 @@ static void bk_fdprintf(int fd, const char *fmt, ...) {
     va_end(args);
 }
 
+
+/******************************* @@hash_table *******************************/
+
+#define hash_table_make(K_T, V_T, HASH) (CAT2(hash_table(K_T, V_T), _make)((HASH), NULL))
+#define hash_table_make_e(K_T, V_T, HASH, EQU) (CAT2(hash_table(K_T, V_T), _make)((HASH), (EQU)))
+#define hash_table_len(t) (t->len)
+#define hash_table_free(t) (t->_free((t)))
+#define hash_table_get_key(t, k) (t->_get_key((t), (k)))
+#define hash_table_get_val(t, k) (t->_get_val((t), (k)))
+#define hash_table_insert(t, k, v) (t->_insert((t), (k), (v)))
+#define hash_table_delete(t, k) (t->_delete((t), (k)))
+#define hash_table_traverse(t, key, val_ptr)                     \
+    for (/* vars */                                              \
+         uint64_t __i    = 0,                                    \
+                  __size = ht_prime_sizes[t->_size_idx];         \
+         /* conditions */                                        \
+         __i < __size;                                           \
+         /* increment */                                         \
+         __i += 1)                                               \
+        for (/* vars */                                          \
+             __typeof__(*t->_data) *__slot_ptr = t->_data + __i, \
+                                    __slot     = *__slot_ptr;    \
+                                                                 \
+             /* conditions */                                    \
+             __slot != NULL                 &&                   \
+             (key     = __slot->_key   , 1) &&                   \
+             (val_ptr = &(__slot->_val), 1);                     \
+                                                                 \
+             /* increment */                                     \
+             __slot_ptr = &(__slot->_next),                      \
+             __slot = *__slot_ptr)                               \
+            /* LOOP BODY HERE */                                 \
+
+
+#define STR(x) _STR(x)
+#define _STR(x) #x
+
+#define CAT2(x, y) _CAT2(x, y)
+#define _CAT2(x, y) x##y
+
+#define CAT3(x, y, z) _CAT3(x, y, z)
+#define _CAT3(x, y, z) x##y##z
+
+#define CAT4(a, b, c, d) _CAT4(a, b, c, d)
+#define _CAT4(a, b, c, d) a##b##c##d
+
+#define _hash_table_slot(K_T, V_T) CAT4(_hash_table_slot_, K_T, _, V_T)
+#define hash_table_slot(K_T, V_T) CAT4(hash_table_slot_, K_T, _, V_T)
+#define _hash_table(K_T, V_T) CAT4(_hash_table_, K_T, _, V_T)
+#define hash_table(K_T, V_T) CAT4(hash_table_, K_T, _, V_T)
+#define hash_table_pretty_name(K_T, V_T) ("hash_table(" CAT3(K_T, ", ", V_T) ")")
+
+#define _HASH_TABLE_EQU(t_ptr, l, r) \
+    ((t_ptr)->_equ ? (t_ptr)->_equ((l), (r)) : (memcmp(&(l), &(r), sizeof((l))) == 0))
+
+#define DEFAULT_START_SIZE_IDX (3)
+
+static uint64_t ht_prime_sizes[] = {
+  5ULL,
+  11ULL,
+  23ULL,
+  47ULL,
+  97ULL,
+  199ULL,
+  409ULL,
+  823ULL,
+  1741ULL,
+  3469ULL,
+  6949ULL,
+  14033ULL,
+  28411ULL,
+  57557ULL,
+  116731ULL,
+  236897ULL,
+  480881ULL,
+  976369ULL,
+  1982627ULL,
+  4026031ULL,
+  8175383ULL,
+  16601593ULL,
+  33712729ULL,
+  68460391ULL,
+  139022417ULL,
+  282312799ULL,
+  573292817ULL,
+  1164186217ULL,
+  2364114217ULL,
+  4294967291ULL,
+  8589934583ULL,
+  17179869143ULL,
+  34359738337ULL,
+  68719476731ULL,
+  137438953447ULL,
+  274877906899ULL,
+  549755813881ULL,
+  1099511627689ULL,
+  2199023255531ULL,
+  4398046511093ULL,
+  8796093022151ULL,
+  17592186044399ULL,
+  35184372088777ULL,
+  70368744177643ULL,
+  140737488355213ULL,
+  281474976710597ULL,
+  562949953421231ULL,
+  1125899906842597ULL,
+  2251799813685119ULL,
+  4503599627370449ULL,
+  9007199254740881ULL,
+  18014398509481951ULL,
+  36028797018963913ULL,
+  72057594037927931ULL,
+  144115188075855859ULL,
+  288230376151711717ULL,
+  576460752303423433ULL,
+  1152921504606846883ULL,
+  2305843009213693951ULL,
+  4611686018427387847ULL,
+  9223372036854775783ULL,
+  18446744073709551557ULL
+};
+
+#define use_hash_table(K_T, V_T)                                                             \
+    struct _hash_table(K_T, V_T);                                                            \
+                                                                                             \
+    typedef struct _hash_table_slot(K_T, V_T) {                                              \
+        K_T _key;                                                                            \
+        V_T _val;                                                                            \
+        uint64_t _hash;                                                                      \
+        struct _hash_table_slot(K_T, V_T) *_next;                                            \
+    }                                                                                        \
+    *hash_table_slot(K_T, V_T);                                                              \
+                                                                                             \
+    typedef void (*CAT2(hash_table(K_T, V_T), _free_t))                                      \
+        (struct _hash_table(K_T, V_T) *);                                                    \
+    typedef K_T* (*CAT2(hash_table(K_T, V_T), _get_key_t))                                   \
+        (struct _hash_table(K_T, V_T) *, K_T);                                               \
+    typedef V_T* (*CAT2(hash_table(K_T, V_T), _get_val_t))                                   \
+        (struct _hash_table(K_T, V_T) *, K_T);                                               \
+    typedef void (*CAT2(hash_table(K_T, V_T), _insert_t))                                    \
+        (struct _hash_table(K_T, V_T) *, K_T, V_T);                                          \
+    typedef int (*CAT2(hash_table(K_T, V_T), _delete_t))                                     \
+        (struct _hash_table(K_T, V_T) *, K_T);                                               \
+    typedef uint64_t (*CAT2(hash_table(K_T, V_T), _hash_t))(K_T);                            \
+    typedef int (*CAT2(hash_table(K_T, V_T), _equ_t))(K_T, K_T);                             \
+                                                                                             \
+    typedef struct _hash_table(K_T, V_T) {                                                   \
+        hash_table_slot(K_T, V_T) *_data;                                                    \
+        uint64_t len, _size_idx, _load_thresh;                                               \
+                                                                                             \
+        CAT2(hash_table(K_T, V_T), _free_t)    const _free;                                  \
+        CAT2(hash_table(K_T, V_T), _get_key_t) const _get_key;                               \
+        CAT2(hash_table(K_T, V_T), _get_val_t) const _get_val;                               \
+        CAT2(hash_table(K_T, V_T), _insert_t)  const _insert;                                \
+        CAT2(hash_table(K_T, V_T), _delete_t)  const _delete;                                \
+        CAT2(hash_table(K_T, V_T), _hash_t)    const _hash;                                  \
+        CAT2(hash_table(K_T, V_T), _equ_t)     const _equ;                                   \
+    }                                                                                        \
+    *hash_table(K_T, V_T);                                                                   \
+                                                                                             \
+    /* hash_table slot */                                                                    \
+    static inline hash_table_slot(K_T, V_T)                                                  \
+        CAT2(hash_table_slot(K_T, V_T), _make)(K_T key, V_T val, uint64_t hash) {            \
+        hash_table_slot(K_T, V_T) slot =                                                     \
+            (hash_table_slot(K_T, V_T))bk_imalloc(sizeof(*slot));                            \
+                                                                                             \
+        slot->_key  = key;                                                                   \
+        slot->_val  = val;                                                                   \
+        slot->_hash = hash;                                                                  \
+        slot->_next = NULL;                                                                  \
+                                                                                             \
+        return slot;                                                                         \
+    }                                                                                        \
+                                                                                             \
+    /* hash_table */                                                                         \
+    static inline void CAT2(hash_table(K_T, V_T), _rehash_insert)                            \
+        (hash_table(K_T, V_T) t, hash_table_slot(K_T, V_T) insert_slot) {                    \
+                                                                                             \
+        uint64_t h, data_size, idx;                                                          \
+        hash_table_slot(K_T, V_T) slot, *slot_ptr;                                           \
+                                                                                             \
+        h         = insert_slot->_hash;                                                      \
+        data_size = ht_prime_sizes[t->_size_idx];                                            \
+        idx       = h % data_size;                                                           \
+        slot_ptr  = t->_data + idx;                                                          \
+                                                                                             \
+        while ((slot = *slot_ptr))    { slot_ptr = &(slot->_next); }                         \
+                                                                                             \
+        *slot_ptr = insert_slot;                                                             \
+    }                                                                                        \
+                                                                                             \
+    static inline void                                                                       \
+        CAT2(hash_table(K_T, V_T), _update_load_thresh)(hash_table(K_T, V_T) t) {            \
+                                                                                             \
+        uint64_t cur_size;                                                                   \
+                                                                                             \
+        cur_size        = ht_prime_sizes[t->_size_idx];                                      \
+        t->_load_thresh = ((double)((cur_size << 1ULL))                                      \
+                            / ((double)(cur_size * 3)))                                      \
+                            * cur_size;                                                      \
+    }                                                                                        \
+                                                                                             \
+    static inline void CAT2(hash_table(K_T, V_T), _rehash)(hash_table(K_T, V_T) t) {         \
+        uint64_t                   old_size,                                                 \
+                                   new_data_size;                                            \
+        hash_table_slot(K_T, V_T) *old_data,                                                 \
+                                   slot,                                                     \
+                                  *slot_ptr,                                                 \
+                                   next;                                                     \
+                                                                                             \
+        old_size      = ht_prime_sizes[t->_size_idx];                                        \
+        old_data      = t->_data;                                                            \
+        t->_size_idx += 1;                                                                   \
+        new_data_size = sizeof(hash_table_slot(K_T, V_T)) * ht_prime_sizes[t->_size_idx];    \
+        t->_data      = (hash_table_slot(K_T, V_T)*)bk_imalloc(new_data_size);               \
+        memset(t->_data, 0, new_data_size);                                                  \
+                                                                                             \
+        for (u64 i = 0; i < old_size; i += 1) {                                              \
+            slot_ptr = old_data + i;                                                         \
+            next = *slot_ptr;                                                                \
+            while ((slot = next)) {                                                          \
+                next        = slot->_next;                                                   \
+                slot->_next = NULL;                                                          \
+                CAT2(hash_table(K_T, V_T), _rehash_insert)(t, slot);                         \
+            }                                                                                \
+        }                                                                                    \
+                                                                                             \
+        bk_ifree(old_data);                                                                  \
+                                                                                             \
+        CAT2(hash_table(K_T, V_T), _update_load_thresh)(t);                                  \
+    }                                                                                        \
+                                                                                             \
+    static inline void                                                                       \
+        CAT2(hash_table(K_T, V_T), _insert)(hash_table(K_T, V_T) t, K_T key, V_T val) {      \
+        uint64_t h, data_size, idx;                                                          \
+        hash_table_slot(K_T, V_T) slot, *slot_ptr;                                           \
+                                                                                             \
+        h         = t->_hash(key);                                                           \
+        data_size = ht_prime_sizes[t->_size_idx];                                            \
+        idx       = h % data_size;                                                           \
+        slot_ptr  = t->_data + idx;                                                          \
+                                                                                             \
+        while ((slot = *slot_ptr)) {                                                         \
+            if (_HASH_TABLE_EQU(t, slot->_key, key)) {                                       \
+                slot->_val = val;                                                            \
+                return;                                                                      \
+            }                                                                                \
+            slot_ptr = &(slot->_next);                                                       \
+        }                                                                                    \
+                                                                                             \
+        *slot_ptr = CAT2(hash_table_slot(K_T, V_T), _make)(key, val, h);                     \
+        t->len   += 1;                                                                       \
+                                                                                             \
+        if (t->len == t->_load_thresh) {                                                     \
+            CAT2(hash_table(K_T, V_T), _rehash)(t);                                          \
+        }                                                                                    \
+    }                                                                                        \
+                                                                                             \
+    static inline int CAT2(hash_table(K_T, V_T), _delete)                                    \
+        (hash_table(K_T, V_T) t, K_T key) {                                                  \
+                                                                                             \
+        uint64_t h, data_size, idx;                                                          \
+        hash_table_slot(K_T, V_T) slot, prev, *slot_ptr;                                     \
+                                                                                             \
+        h = t->_hash(key);                                                                   \
+        data_size = ht_prime_sizes[t->_size_idx];                                            \
+        idx = h % data_size;                                                                 \
+        slot_ptr = t->_data + idx;                                                           \
+        prev = NULL;                                                                         \
+                                                                                             \
+        while ((slot = *slot_ptr)) {                                                         \
+            if (_HASH_TABLE_EQU(t, slot->_key, key)) {                                       \
+                break;                                                                       \
+            }                                                                                \
+            prev     = slot;                                                                 \
+            slot_ptr = &(slot->_next);                                                       \
+        }                                                                                    \
+                                                                                             \
+        if ((slot = *slot_ptr)) {                                                            \
+            if (prev) {                                                                      \
+                prev->_next = slot->_next;                                                   \
+            } else {                                                                         \
+                *slot_ptr = slot->_next;                                                     \
+            }                                                                                \
+            bk_ifree(slot);                                                                  \
+            t->len -= 1;                                                                     \
+            return 1;                                                                        \
+        }                                                                                    \
+        return 0;                                                                            \
+    }                                                                                        \
+                                                                                             \
+    static inline K_T*                                                                       \
+        CAT2(hash_table(K_T, V_T), _get_key)(hash_table(K_T, V_T) t, K_T key) {              \
+                                                                                             \
+        uint64_t h, data_size, idx;                                                          \
+        hash_table_slot(K_T, V_T) slot, *slot_ptr;                                           \
+                                                                                             \
+        h         = t->_hash(key);                                                           \
+        data_size = ht_prime_sizes[t->_size_idx];                                            \
+        idx       = h % data_size;                                                           \
+        slot_ptr  = t->_data + idx;                                                          \
+                                                                                             \
+        while ((slot = *slot_ptr)) {                                                         \
+            if (_HASH_TABLE_EQU(t, slot->_key, key)) {                                       \
+                return &slot->_key;                                                          \
+            }                                                                                \
+            slot_ptr = &(slot->_next);                                                       \
+        }                                                                                    \
+                                                                                             \
+        return NULL;                                                                         \
+    }                                                                                        \
+                                                                                             \
+    static inline V_T*                                                                       \
+        CAT2(hash_table(K_T, V_T), _get_val)(hash_table(K_T, V_T) t, K_T key) {              \
+                                                                                             \
+        uint64_t h, data_size, idx;                                                          \
+        hash_table_slot(K_T, V_T) slot, *slot_ptr;                                           \
+                                                                                             \
+        h         = t->_hash(key);                                                           \
+        data_size = ht_prime_sizes[t->_size_idx];                                            \
+        idx       = h % data_size;                                                           \
+        slot_ptr  = t->_data + idx;                                                          \
+                                                                                             \
+        while ((slot = *slot_ptr)) {                                                         \
+            if (_HASH_TABLE_EQU(t, slot->_key, key)) {                                       \
+                return &slot->_val;                                                          \
+            }                                                                                \
+            slot_ptr = &(slot->_next);                                                       \
+        }                                                                                    \
+                                                                                             \
+        return NULL;                                                                         \
+    }                                                                                        \
+                                                                                             \
+    static inline void CAT2(hash_table(K_T, V_T), _free)(hash_table(K_T, V_T) t) {           \
+        for (u64 i = 0; i < ht_prime_sizes[t->_size_idx]; i += 1) {                          \
+            hash_table_slot(K_T, V_T) next, slot = t->_data[i];                              \
+            while (slot != NULL) {                                                           \
+                next = slot->_next;                                                          \
+                bk_ifree(slot);                                                              \
+                slot = next;                                                                 \
+            }                                                                                \
+        }                                                                                    \
+        bk_ifree(t->_data);                                                                  \
+        bk_ifree(t);                                                                         \
+    }                                                                                        \
+                                                                                             \
+    static inline hash_table(K_T, V_T)                                                       \
+    CAT2(hash_table(K_T, V_T), _make)(CAT2(hash_table(K_T, V_T), _hash_t) hash, void *equ) { \
+        hash_table(K_T, V_T) t = (hash_table(K_T, V_T))bk_imalloc(sizeof(*t));               \
+                                                                                             \
+        uint64_t data_size                                                                   \
+            = ht_prime_sizes[DEFAULT_START_SIZE_IDX] * sizeof(hash_table_slot(K_T, V_T));    \
+        hash_table_slot(K_T, V_T) *the_data                                                  \
+            = (hash_table_slot(K_T, V_T)*)bk_imalloc(data_size);                             \
+                                                                                             \
+        memset(the_data, 0, data_size);                                                      \
+                                                                                             \
+        struct _hash_table(K_T, V_T)                                                         \
+            init = {._data     = the_data,                                                   \
+                    .len       = 0,                                                          \
+                    ._size_idx = DEFAULT_START_SIZE_IDX,                                     \
+                    ._free     = CAT2(hash_table(K_T, V_T), _free),                          \
+                    ._get_key  = CAT2(hash_table(K_T, V_T), _get_key),                       \
+                    ._get_val  = CAT2(hash_table(K_T, V_T), _get_val),                       \
+                    ._insert   = CAT2(hash_table(K_T, V_T), _insert),                        \
+                    ._delete   = CAT2(hash_table(K_T, V_T), _delete),                        \
+                    ._hash     = (CAT2(hash_table(K_T, V_T), _hash_t))hash,                  \
+                    ._equ      = (CAT2(hash_table(K_T, V_T), _equ_t))equ};                   \
+                                                                                             \
+        memcpy((void*)t, (void*)&init, sizeof(*t));                                          \
+                                                                                             \
+        CAT2(hash_table(K_T, V_T), _update_load_thresh)(t);                                  \
+                                                                                             \
+        return t;                                                                            \
+    }                                                                                        \
+
+
+
 /******************************* @@config *******************************/
+
+#ifndef BKMALLOC_HOOK
 
 #define BK_SCFG_ERR_NONE          (0)
 #define BK_SCFG_ERR_BAD_FILE      (1)
@@ -831,359 +1283,16 @@ typedef struct {
 static void bk_scfg_entry_free(bk_scfg_entry_t *entry) {
     if (entry->kind == BK_SCFG_KIND_STRING) {
         if (entry->sdef != NULL) {
-            free((void*)entry->sdef);
+            bk_ifree((void*)entry->sdef);
         }
     }
 }
 
-typedef const char *bk_scfg_str;
-
-/*********************************************************************
-    BEGIN HASH TABLE
-
-    You can ignore this part.
-    Generated by running github.com/kammerdienerb/hash_table.h through
-    the preprocessor.
-**********************************************************************/
-static uint64_t ht_prime_sizes[] = {
-                             5ULL,
-                             11ULL,
-                             23ULL,
-                             47ULL,
-                             97ULL,
-                             199ULL,
-                             409ULL,
-                             823ULL,
-                             1741ULL,
-                             3469ULL,
-                             6949ULL,
-                             14033ULL,
-                             28411ULL,
-                             57557ULL,
-                             116731ULL,
-                             236897ULL,
-                             480881ULL,
-                             976369ULL,
-                             1982627ULL,
-                             4026031ULL,
-                             8175383ULL,
-                             16601593ULL,
-                             33712729ULL,
-                             68460391ULL,
-                             139022417ULL,
-                             282312799ULL,
-                             573292817ULL,
-                             1164186217ULL,
-                             2364114217ULL,
-                             4294967291ULL,
-                             8589934583ULL,
-                             17179869143ULL,
-                             34359738337ULL,
-                             68719476731ULL,
-                             137438953447ULL,
-                             274877906899ULL,
-                             549755813881ULL,
-                             1099511627689ULL,
-                             2199023255531ULL,
-                             4398046511093ULL,
-                             8796093022151ULL,
-                             17592186044399ULL,
-                             35184372088777ULL,
-                             70368744177643ULL,
-                             140737488355213ULL,
-                             281474976710597ULL,
-                             562949953421231ULL,
-                             1125899906842597ULL,
-                             2251799813685119ULL,
-                             4503599627370449ULL,
-                             9007199254740881ULL,
-                             18014398509481951ULL,
-                             36028797018963913ULL,
-                             72057594037927931ULL,
-                             144115188075855859ULL,
-                             288230376151711717ULL,
-                             576460752303423433ULL,
-                             1152921504606846883ULL,
-                             2305843009213693951ULL,
-                             4611686018427387847ULL,
-                             9223372036854775783ULL,
-                             18446744073709551557ULL};
-struct _hash_table_bk_scfg_str_bk_scfg_entry_t;
-typedef struct _hash_table_slot_bk_scfg_str_bk_scfg_entry_t {
-    bk_scfg_str _key;
-    bk_scfg_entry_t _val;
-    uint64_t _hash;
-    struct _hash_table_slot_bk_scfg_str_bk_scfg_entry_t * _next;
-} * hash_table_slot_bk_scfg_str_bk_scfg_entry_t;
-typedef void (*hash_table_bk_scfg_str_bk_scfg_entry_t_free_t)(
-    struct _hash_table_bk_scfg_str_bk_scfg_entry_t *);
-typedef bk_scfg_str * (*hash_table_bk_scfg_str_bk_scfg_entry_t_get_key_t)(
-    struct _hash_table_bk_scfg_str_bk_scfg_entry_t *, bk_scfg_str);
-typedef bk_scfg_entry_t * (*hash_table_bk_scfg_str_bk_scfg_entry_t_get_val_t)(
-    struct _hash_table_bk_scfg_str_bk_scfg_entry_t *, bk_scfg_str);
-typedef void (*hash_table_bk_scfg_str_bk_scfg_entry_t_insert_t)(
-    struct _hash_table_bk_scfg_str_bk_scfg_entry_t *, bk_scfg_str, bk_scfg_entry_t);
-typedef int (*hash_table_bk_scfg_str_bk_scfg_entry_t_delete_t)(
-    struct _hash_table_bk_scfg_str_bk_scfg_entry_t *, bk_scfg_str);
-typedef uint64_t (*hash_table_bk_scfg_str_bk_scfg_entry_t_hash_t)(bk_scfg_str);
-typedef int (*hash_table_bk_scfg_str_bk_scfg_entry_t_equ_t)(bk_scfg_str, bk_scfg_str);
-typedef struct _hash_table_bk_scfg_str_bk_scfg_entry_t {
-    hash_table_slot_bk_scfg_str_bk_scfg_entry_t * _data;
-    uint64_t len, _size_idx, _load_thresh;
-    hash_table_bk_scfg_str_bk_scfg_entry_t_free_t const _free;
-    hash_table_bk_scfg_str_bk_scfg_entry_t_get_key_t const _get_key;
-    hash_table_bk_scfg_str_bk_scfg_entry_t_get_val_t const _get_val;
-    hash_table_bk_scfg_str_bk_scfg_entry_t_insert_t const _insert;
-    hash_table_bk_scfg_str_bk_scfg_entry_t_delete_t const _delete;
-    hash_table_bk_scfg_str_bk_scfg_entry_t_hash_t const _hash;
-    hash_table_bk_scfg_str_bk_scfg_entry_t_equ_t const _equ;
-} * hash_table_bk_scfg_str_bk_scfg_entry_t;
-static inline hash_table_slot_bk_scfg_str_bk_scfg_entry_t
-hash_table_slot_bk_scfg_str_bk_scfg_entry_t_make(bk_scfg_str key, bk_scfg_entry_t val,
-                                           uint64_t hash) {
-    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot =
-        (hash_table_slot_bk_scfg_str_bk_scfg_entry_t)bk_imalloc(sizeof(*slot));
-    slot->_key = key;
-    slot->_val = val;
-    slot->_hash = hash;
-    slot->_next = NULL;
-    return slot;
-}
-static inline void hash_table_bk_scfg_str_bk_scfg_entry_t_rehash_insert(
-    hash_table_bk_scfg_str_bk_scfg_entry_t t,
-    hash_table_slot_bk_scfg_str_bk_scfg_entry_t insert_slot) {
-    uint64_t h, data_size, idx;
-    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot, *slot_ptr;
-    h = insert_slot->_hash;
-    data_size = ht_prime_sizes[t->_size_idx];
-    idx = h % data_size;
-    slot_ptr = t->_data + idx;
-    while ((slot = *slot_ptr)) {
-        slot_ptr = &(slot->_next);
-    }
-    *slot_ptr = insert_slot;
-}
-static inline void hash_table_bk_scfg_str_bk_scfg_entry_t_update_load_thresh(
-    hash_table_bk_scfg_str_bk_scfg_entry_t t) {
-    uint64_t cur_size;
-    cur_size = ht_prime_sizes[t->_size_idx];
-    t->_load_thresh =
-        ((double)((cur_size << 1ULL)) / ((double)(cur_size * 3))) * cur_size;
-}
-static inline void
-hash_table_bk_scfg_str_bk_scfg_entry_t_rehash(hash_table_bk_scfg_str_bk_scfg_entry_t t) {
-    uint64_t old_size, new_data_size;
-    hash_table_slot_bk_scfg_str_bk_scfg_entry_t *old_data, slot, *slot_ptr, next;
-    old_size = ht_prime_sizes[t->_size_idx];
-    old_data = t->_data;
-    t->_size_idx += 1;
-    new_data_size = sizeof(hash_table_slot_bk_scfg_str_bk_scfg_entry_t) *
-                    ht_prime_sizes[t->_size_idx];
-    t->_data = (hash_table_slot_bk_scfg_str_bk_scfg_entry_t*)bk_imalloc(new_data_size);
-    memset(t->_data, 0, new_data_size);
-    for (uint64_t i = 0; i < old_size; i += 1) {
-        slot_ptr = old_data + i;
-        next = *slot_ptr;
-        while ((slot = next)) {
-            next = slot->_next;
-            slot->_next = NULL;
-            hash_table_bk_scfg_str_bk_scfg_entry_t_rehash_insert(t, slot);
-        }
-    }
-    bk_ifree(old_data);
-    hash_table_bk_scfg_str_bk_scfg_entry_t_update_load_thresh(t);
-}
-static inline void
-hash_table_bk_scfg_str_bk_scfg_entry_t_insert(hash_table_bk_scfg_str_bk_scfg_entry_t t,
-                                        bk_scfg_str key, bk_scfg_entry_t val) {
-    uint64_t h, data_size, idx;
-    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot, *slot_ptr;
-    h = t->_hash(key);
-    data_size = ht_prime_sizes[t->_size_idx];
-    idx = h % data_size;
-    slot_ptr = t->_data + idx;
-    while ((slot = *slot_ptr)) {
-        if (((t)->_equ ? (t)->_equ((slot->_key), (key))
-                       : (slot->_key) == (key))) {
-            slot->_val = val;
-            return;
-        }
-        slot_ptr = &(slot->_next);
-    }
-    *slot_ptr = hash_table_slot_bk_scfg_str_bk_scfg_entry_t_make(key, val, h);
-    t->len += 1;
-    if (t->len == t->_load_thresh) {
-        hash_table_bk_scfg_str_bk_scfg_entry_t_rehash(t);
-    }
-}
-static inline int
-hash_table_bk_scfg_str_bk_scfg_entry_t_delete(hash_table_bk_scfg_str_bk_scfg_entry_t t,
-                                        bk_scfg_str key) {
-    uint64_t h, data_size, idx;
-    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot, prev, *slot_ptr;
-    h = t->_hash(key);
-    data_size = ht_prime_sizes[t->_size_idx];
-    idx = h % data_size;
-    slot_ptr = t->_data + idx;
-    prev = NULL;
-    while ((slot = *slot_ptr)) {
-        if (((t)->_equ ? (t)->_equ((slot->_key), (key))
-                       : (slot->_key) == (key))) {
-            break;
-        }
-        prev = slot;
-        slot_ptr = &(slot->_next);
-    }
-    if ((slot = *slot_ptr)) {
-        if (prev) {
-            prev->_next = slot->_next;
-        } else {
-            *slot_ptr = slot->_next;
-        }
-        bk_ifree(slot);
-        t->len -= 1;
-        return 1;
-    }
-    return 0;
-}
-static inline bk_scfg_str *
-hash_table_bk_scfg_str_bk_scfg_entry_t_get_key(hash_table_bk_scfg_str_bk_scfg_entry_t t,
-                                         bk_scfg_str key) {
-    uint64_t h, data_size, idx;
-    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot, *slot_ptr;
-    h = t->_hash(key);
-    data_size = ht_prime_sizes[t->_size_idx];
-    idx = h % data_size;
-    slot_ptr = t->_data + idx;
-    while ((slot = *slot_ptr)) {
-        if (((t)->_equ ? (t)->_equ((slot->_key), (key))
-                       : (slot->_key) == (key))) {
-            return &slot->_key;
-        }
-        slot_ptr = &(slot->_next);
-    }
-    return NULL;
-}
-static inline bk_scfg_entry_t *
-hash_table_bk_scfg_str_bk_scfg_entry_t_get_val(hash_table_bk_scfg_str_bk_scfg_entry_t t,
-                                         bk_scfg_str key) {
-    uint64_t h, data_size, idx;
-    hash_table_slot_bk_scfg_str_bk_scfg_entry_t slot, *slot_ptr;
-    h = t->_hash(key);
-    data_size = ht_prime_sizes[t->_size_idx];
-    idx = h % data_size;
-    slot_ptr = t->_data + idx;
-    while ((slot = *slot_ptr)) {
-        if (((t)->_equ ? (t)->_equ((slot->_key), (key))
-                       : (slot->_key) == (key))) {
-            return &slot->_val;
-        }
-        slot_ptr = &(slot->_next);
-    }
-    return NULL;
-}
-static inline void
-hash_table_bk_scfg_str_bk_scfg_entry_t_free(hash_table_bk_scfg_str_bk_scfg_entry_t t) {
-    for (uint64_t i = 0; i < ht_prime_sizes[t->_size_idx]; i += 1) {
-        hash_table_slot_bk_scfg_str_bk_scfg_entry_t next, slot = t->_data[i];
-        while (slot != NULL) {
-            next = slot->_next;
-            bk_ifree(slot);
-            slot = next;
-        }
-    }
-    bk_ifree(t->_data);
-    bk_ifree(t);
-}
-static inline hash_table_bk_scfg_str_bk_scfg_entry_t
-hash_table_bk_scfg_str_bk_scfg_entry_t_make(
-    hash_table_bk_scfg_str_bk_scfg_entry_t_hash_t hash, void * equ) {
-    hash_table_bk_scfg_str_bk_scfg_entry_t t
-        = (hash_table_bk_scfg_str_bk_scfg_entry_t)bk_imalloc(sizeof(*t));
-    uint64_t data_size =
-        ht_prime_sizes[(3)] * sizeof(hash_table_slot_bk_scfg_str_bk_scfg_entry_t);
-    hash_table_slot_bk_scfg_str_bk_scfg_entry_t * the_data
-        = (hash_table_slot_bk_scfg_str_bk_scfg_entry_t*)bk_imalloc(data_size);
-    memset(the_data, 0, data_size);
-    struct _hash_table_bk_scfg_str_bk_scfg_entry_t init = {
-        ._data = the_data,
-        .len = 0,
-        ._size_idx = (3),
-        ._load_thresh = 0,
-        ._free = hash_table_bk_scfg_str_bk_scfg_entry_t_free,
-        ._get_key = hash_table_bk_scfg_str_bk_scfg_entry_t_get_key,
-        ._get_val = hash_table_bk_scfg_str_bk_scfg_entry_t_get_val,
-        ._insert = hash_table_bk_scfg_str_bk_scfg_entry_t_insert,
-        ._delete = hash_table_bk_scfg_str_bk_scfg_entry_t_delete,
-        ._hash = (hash_table_bk_scfg_str_bk_scfg_entry_t_hash_t)hash,
-        ._equ = (hash_table_bk_scfg_str_bk_scfg_entry_t_equ_t)equ};
-    memcpy((void*)t, (void*)&init, sizeof(*t));
-    hash_table_bk_scfg_str_bk_scfg_entry_t_update_load_thresh(t);
-    return t;
-};
-
-#define STR(x) _STR(x)
-#define _STR(x) #x
-
-#define CAT2(x, y) _CAT2(x, y)
-#define _CAT2(x, y) x##y
-
-#define CAT3(x, y, z) _CAT3(x, y, z)
-#define _CAT3(x, y, z) x##y##z
-
-#define CAT4(a, b, c, d) _CAT4(a, b, c, d)
-#define _CAT4(a, b, c, d) a##b##c##d
-
-#define hash_table(K_T, V_T) CAT4(hash_table_, K_T, _, V_T)
-
-#define hash_table_make(K_T, V_T, HASH) (CAT2(hash_table(K_T, V_T), _make)((HASH), NULL))
-#define hash_table_make_e(K_T, V_T, HASH, EQU) (CAT2(hash_table(K_T, V_T), _make)((HASH), (EQU)))
-#define hash_table_len(t) (t->len)
-#define hash_table_free(t) (t->_free((t)))
-#define hash_table_get_key(t, k) (t->_get_key((t), (k)))
-#define hash_table_get_val(t, k) (t->_get_val((t), (k)))
-#define hash_table_insert(t, k, v) (t->_insert((t), (k), (v)))
-#define hash_table_delete(t, k) (t->_delete((t), (k)))
-#define hash_table_traverse(t, key, val_ptr)                     \
-    for (/* vars */                                              \
-         uint64_t __i    = 0,                                    \
-                  __size = ht_prime_sizes[t->_size_idx];         \
-         /* conditions */                                        \
-         __i < __size;                                           \
-         /* increment */                                         \
-         __i += 1)                                               \
-        for (/* vars */                                          \
-             __typeof__(*t->_data) *__slot_ptr = t->_data + __i, \
-                                    __slot     = *__slot_ptr;    \
-                                                                 \
-             /* conditions */                                    \
-             __slot != NULL                 &&                   \
-             (key     = __slot->_key   , 1) &&                   \
-             (val_ptr = &(__slot->_val), 1);                     \
-                                                                 \
-             /* increment */                                     \
-             __slot_ptr = &(__slot->_next),                      \
-             __slot = *__slot_ptr)                               \
-            /* LOOP BODY HERE */
-/*********************************************************************
-    END HASH TABLE
-**********************************************************************/
-
-static u64 bk_scfg_str_hash(bk_scfg_str s) {
-    unsigned long hash = 5381;
-    int c;
-
-    while ((c = *s++))
-    hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
-
-    return hash;
-}
-
-static int bk_scfg_str_equ(bk_scfg_str a, bk_scfg_str b) { return strcmp(a, b) == 0; }
 
 
+use_hash_table(bk_str, bk_scfg_entry_t);
 
-typedef hash_table(bk_scfg_str, bk_scfg_entry_t) bk_hash_table_t;
+typedef hash_table(bk_str, bk_scfg_entry_t) bk_hash_table_t;
 
 
 struct bk_scfg {
@@ -1201,7 +1310,7 @@ do {                                                         \
     if ((cfg)->err_msg) {                                    \
         free((void*)(cfg)->err_msg);                         \
     }                                                        \
-    (cfg)->err_msg  = strdup(__bk_scfg_err_buff);            \
+    (cfg)->err_msg  = bk_istrdup(__bk_scfg_err_buff);        \
     (cfg)->err_kind = (kind);                                \
 } while (0)
 
@@ -1211,7 +1320,7 @@ static struct bk_scfg* bk_scfg_make(void) {
     cfg = (struct bk_scfg*)bk_imalloc(sizeof(*cfg));
     memset((void*)cfg, 0, sizeof(*cfg));
 
-    cfg->table = hash_table_make_e(bk_scfg_str, bk_scfg_entry_t, bk_scfg_str_hash, (void*)bk_scfg_str_equ);
+    cfg->table = hash_table_make_e(bk_str, bk_scfg_entry_t, bk_str_hash, (void*)bk_str_equ);
 
     return cfg;
 }
@@ -1312,7 +1421,7 @@ static void bk_scfg_default_string(struct bk_scfg *cfg, const char *key, const c
 
     if (!GET_ENTRY(cfg, entry, key, BK_SCFG_KIND_STRING)) { return; }
 
-    entry->sdef   = strdup(def);
+    entry->sdef   = bk_istrdup(def);
     entry->flags |= BK_SCFG_ENTRY_HAS_DEFAULT;
 }
 
@@ -1347,6 +1456,8 @@ static void bk_scfg_validate_string(struct bk_scfg *cfg, const char *key, bk_scf
 
     entry->validate = (void*)validate;
 }
+
+#undef GET_ENTRY
 
 
 static void bk_scfg_validate_set_err(struct bk_scfg *cfg, const char *msg) {
@@ -1736,6 +1847,8 @@ static const char *bk_scfg_err_msg(struct bk_scfg *cfg) {
     return "";
 }
 
+#endif /* BKMALLOC_HOOK */
+
 
 #define LIST_GC_POLICIES(X) \
     X(never)                \
@@ -1782,6 +1895,8 @@ typedef struct {
 } bk_Config;
 
 static bk_Config bk_config;
+
+#ifndef BKMALLOC_HOOK
 
 enum {
     BK_OPT_BOOL,
@@ -1874,11 +1989,18 @@ void bk_log_config(void) {
             if (o->category == i) {
                 switch (o->type) {
                     case BK_OPT_BOOL:
-                        bk_logf("  %-*s  %s\n", (int)max_name_len, o->name, *(int*)o->ptr ? "YES" : "NO"); break;
+                        bk_logf("  %-*s  %s\n", (int)max_name_len, o->name, *(int*)o->ptr ? "YES" : "NO");
+                        break;
                     case BK_OPT_INT:
-                        bk_logf("  %-*s  %d\n", (int)max_name_len, o->name, *(int*)o->ptr);                break;
+                        bk_logf("  %-*s  %d\n", (int)max_name_len, o->name, *(int*)o->ptr);
+                        break;
                     case BK_OPT_STRING:
-                        bk_logf("  %-*s  '%s'\n", (int)max_name_len, o->name, *(char**)o->ptr);            break;
+                        if (*(char**)o->ptr == NULL) {
+                            bk_logf("  %-*s  NULL\n", (int)max_name_len, o->name);
+                        } else {
+                            bk_logf("  %-*s  '%s'\n", (int)max_name_len, o->name, *(char**)o->ptr);
+                        }
+                        break;
                 }
             }
         }
@@ -2070,46 +2192,17 @@ out:;
     return status;
 }
 
-#undef BK_BK_SCFG_ENTRY_REQUIRED
-#undef BK_BK_SCFG_ENTRY_HAS_DEFAULT
-#undef BK_BK_SCFG_ENTRY_SET
-#undef BK_BK_SCFG_KIND_BOOL
-#undef BK_BK_SCFG_KIND_INT
-#undef BK_BK_SCFG_KIND_FLOAT
-#undef BK_BK_SCFG_KIND_STRING
-#undef BK_SCFG_ERR_NONE
-#undef BK_SCFG_ERR_BAD_FILE
-#undef BK_SCFG_ERR_BAD_SYNTAX
-#undef BK_SCFG_ERR_BAD_KEY
-#undef BK_SCFG_ERR_BAD_VAL
-#undef BK_SCFG_ERR_VALIDATE
-#undef STR
-#undef _STR
-#undef CAT2
-#undef _CAT2
-#undef CAT3
-#undef _CAT3
-#undef CAT4
-#undef _CAT4
-#undef hash_table
-#undef hash_table_make
-#undef hash_table_make_e
-#undef hash_table_len
-#undef hash_table_free
-#undef hash_table_get_key
-#undef hash_table_get_val
-#undef hash_table_insert
-#undef hash_table_delete
-#undef hash_table_traverse
-#undef GET_ENTRY
-#undef BK_BK_SCFG_SET_ERR
 
+#endif /* BKMALLOC_HOOK */
 
 /******************************* @@hooks *******************************/
+
+#ifndef BKMALLOC_HOOK
 
 union bk_Block;
 
 typedef struct {
+    void *handle;
     void (*block_new)(struct bk_Heap*, union bk_Block*);
     void (*block_release)(struct bk_Heap*, union bk_Block*);
     void (*pre_alloc)(struct bk_Heap**, u64*, u64*, int*);
@@ -2127,8 +2220,6 @@ do {                                 \
 } while (0)
 
 static void bk_init_hooks(void) {
-    void *handle;
-
     if (bk_config.disable_hooks) { return; }
 
     if (bk_config.log_hooks) {
@@ -2139,23 +2230,23 @@ static void bk_init_hooks(void) {
         }
     }
 
-    handle = dlopen(bk_config.hooks_file ? bk_config.hooks_file : "libbkmalloc.so", RTLD_NOW);
+    bk_hooks.handle = bk_open_library(bk_config.hooks_file ? bk_config.hooks_file : "libbkmalloc.so");
 
-    if (handle == NULL) {
+    if (bk_hooks.handle == NULL) {
         bk_logf("error loading %shooks: %s\n", bk_config.hooks_file ? "" : "built-in ", dlerror());
         return;
     }
 
-#define INSTALL_HOOK(_name)                                                         \
-do {                                                                                \
-    bk_hooks._name = (__typeof(bk_hooks._name))dlsym(handle, "bk_" #_name "_hook"); \
-    if (bk_config.log_hooks) {                                                      \
-        if (bk_hooks._name != NULL) {                                               \
-            bk_logf("hooks-install %-13s LOADED\n", #_name);                        \
-        } else {                                                                    \
-            bk_logf("hooks-install %-13s NOT FOUND %s\n", #_name, dlerror());       \
-        }                                                                           \
-    }                                                                               \
+#define INSTALL_HOOK(_name)                                                                              \
+do {                                                                                                     \
+    bk_hooks._name = (__typeof(bk_hooks._name))bk_library_symbol(bk_hooks.handle, "bk_" #_name "_hook"); \
+    if (bk_config.log_hooks) {                                                                           \
+        if (bk_hooks._name != NULL) {                                                                    \
+            bk_logf("hooks-install %-13s LOADED\n", #_name);                                             \
+        } else {                                                                                         \
+            bk_logf("hooks-install %-13s NOT FOUND %s\n", #_name, dlerror());                            \
+        }                                                                                                \
+    }                                                                                                    \
 } while (0)
 
     INSTALL_HOOK(block_new);
@@ -2166,6 +2257,8 @@ do {                                                                            
 
 #undef INSTALL_HOOK
 }
+
+#endif /* BKMALLOC_HOOK */
 
 /******************************* @@blocks *******************************/
 
@@ -2326,6 +2419,7 @@ typedef struct bk_Heap {
     u32          reuse_list_len;
     bk_Block    *reuse_list;
     bk_Spinlock  reuse_list_lock;
+    char        *user_key;
 } bk_Heap;
 
 static bk_Heap _bk_global_heap;
@@ -2346,29 +2440,13 @@ static bk_Heap _bk_global_heap = {
 GLOBAL_ALIGN(CACHE_LINE)
 static bk_Heap *bk_global_heap = &_bk_global_heap;
 
-static inline void bk_init_heap(bk_Heap *heap, u32 kind) {
-    u32 i;
-
-    bk_memzero((void*)heap, sizeof(*heap));
-
-    heap->flags |= 1 << kind;
-
-    for (i = 0; i < BK_NR_SIZE_CLASSES; i += 1) {
-        bk_spin_init(&heap->block_list_locks[i]);
-    }
-
-    heap->hid = FAA(&bk_hid_counter, 1);
-
-    if (bk_config.log_heaps) {
-        bk_logf("heap %u kind %s\n", heap->hid, kind == BK_HEAP_THREAD ? "THREAD" : "USER");
-    }
-}
-
 
 BK_ALWAYS_INLINE
 static inline u32 bk_get_size_class_idx(u64 size) {
     u64 shift;
     u32 size_class_idx;
+
+    size = MAX(MIN_ALIGN, size);
 
     shift          = 64ULL - 1 - CLZ(size);
     size_class_idx = ((size == (1ULL << shift)) ? shift : shift + 1ULL) - LOG2_64BIT(BK_BASE_SIZE_CLASS);
@@ -2383,6 +2461,19 @@ static inline u32 bk_get_size_class_idx(u64 size) {
 BK_ALWAYS_INLINE
 static inline u64 bk_size_class_idx_to_size(u32 idx) {
     return (1ULL << (LOG2_SIZE_CLASS_FROM_IDX(idx)));
+}
+
+
+#ifndef BKMALLOC_HOOK
+
+typedef bk_Heap *bk_heap_ptr;
+use_hash_table(bk_str, bk_heap_ptr);
+
+static hash_table(bk_str, bk_heap_ptr) bk_user_heaps;
+static bk_Spinlock                     bk_user_heaps_lock;
+
+static void bk_init_user_heaps(void) {
+    bk_user_heaps = hash_table_make_e(bk_str, bk_heap_ptr, bk_str_hash, (void*)bk_str_equ);
 }
 
 BK_ALWAYS_INLINE
@@ -2489,6 +2580,69 @@ static int bk_verify_reuse_list(bk_Heap *heap) {
 }
 #endif
 
+static inline void bk_init_heap(bk_Heap *heap, u32 kind, const char *user_key) {
+    u32 i;
+
+    bk_memzero((void*)heap, sizeof(*heap));
+
+    heap->flags |= 1 << kind;
+
+    for (i = 0; i < BK_NR_SIZE_CLASSES; i += 1) {
+        bk_spin_init(&heap->block_list_locks[i]);
+    }
+
+    heap->hid = FAA(&bk_hid_counter, 1);
+
+    if (user_key != NULL) {
+        heap->user_key = bk_istrdup(user_key);
+    }
+
+    if (bk_config.log_heaps) {
+        if (heap->user_key != NULL) {
+            bk_logf("heap %u kind %s (%s)\n", heap->hid, kind == BK_HEAP_THREAD ? "THREAD" : "USER", heap->user_key);
+        } else {
+            bk_logf("heap %u kind %s\n", heap->hid, kind == BK_HEAP_THREAD ? "THREAD" : "USER");
+        }
+    }
+}
+
+static inline void bk_free_heap(bk_Heap *heap) {
+    u32       i;
+    bk_Block *block;
+    bk_Block *next;
+
+    for (i = 0; i < BK_NR_SIZE_CLASSES; i += 1) {
+        bk_spin_lock(&heap->block_list_locks[i]);
+
+        block = heap->block_lists[i];
+        while (block != NULL) {
+            next = block->meta.next;
+            bk_release_block(block);
+            block = next;
+        }
+
+        heap->block_lists[i] = NULL;
+
+        bk_spin_unlock(&heap->block_list_locks[i]);
+    }
+
+    bk_spin_lock(&heap->reuse_list_lock);
+
+    block = heap->reuse_list;
+    while (block != NULL) {
+        next = block->meta.next;
+        bk_release_block(block);
+        block = next;
+    }
+    heap->reuse_list = NULL;
+
+    if (heap->user_key != NULL) {
+        bk_ifree(heap->user_key);
+    }
+
+    bk_spin_unlock(&heap->reuse_list_lock);
+}
+
 BK_ALWAYS_INLINE
 static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 size, int zero_mem) {
     bk_Block *block;
@@ -2556,7 +2710,7 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
                         }
                     }
 
-                    madvise((void*)((u8*)block + PAGE_SIZE), block->meta.size - PAGE_SIZE, MADV_DONTNEED);
+                    bk_decommit_pages((void*)((u8*)block + PAGE_SIZE), (block->meta.size - PAGE_SIZE) / PAGE_SIZE);
                     block->meta.zero = 1;
                 }
             }
@@ -2572,7 +2726,7 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
         bk_reset_block(best_fit, heap, size_class_idx, best_fit->meta.size, best_fit->meta.zero);
 
         if (zero_mem && !best_fit->meta.zero) {
-            madvise((void*)((u8*)best_fit + PAGE_SIZE), best_fit->meta.size - PAGE_SIZE, MADV_DONTNEED);
+            bk_decommit_pages((void*)((u8*)best_fit + PAGE_SIZE), (best_fit->meta.size - PAGE_SIZE) / PAGE_SIZE);
         }
 
         if (bk_config.log_blocks) {
@@ -2644,7 +2798,7 @@ static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
         bk_release_block(block);
     } else {
         if (block->meta.from_calloc) {
-            madvise((void*)((u8*)block + PAGE_SIZE), block->meta.size - PAGE_SIZE, MADV_DONTNEED);
+            bk_decommit_pages((void*)((u8*)block + PAGE_SIZE), (block->meta.size - PAGE_SIZE) / PAGE_SIZE);
             block->meta.zero = 1;
         } else {
             block->meta.zero = 0;
@@ -3149,7 +3303,7 @@ out:;
     }
 
     if (bk_config.log_allocs) {
-        bk_logf("alloc 0x%X size %U align %U\n", mem, n_bytes, alignment);
+        bk_logf("alloc 0x%X heap %u size %U align %U\n", mem, heap->hid, n_bytes, alignment);
     }
 
     return mem;
@@ -3195,7 +3349,7 @@ static inline void bk_heap_free(bk_Heap *heap, void *addr) {
     }
 
     if (bk_config.log_frees) {
-        bk_logf("free 0x%X  free_count: %u\n", addr, heap->free_count);
+        bk_logf("free 0x%X heap %u free_count: %u\n", addr, heap->hid, heap->free_count);
     }
 }
 
@@ -3227,8 +3381,11 @@ static char *bk_istrdup(const char *s) {
     return ret;
 }
 
+#endif /* BKMALLOC_HOOK */
 
 /******************************* @@threads *******************************/
+
+#ifndef BKMALLOC_HOOK
 
 typedef struct {
     bk_Heap     *heap;
@@ -3240,7 +3397,6 @@ typedef struct {
 static bk_Thread_Data *_bk_thread_datas;
 static u32             _bk_main_thread_cpu;
 static u32             _bk_nr_cpus;
-
 
 static inline void bk_init_threads(void) {
     _bk_main_thread_cpu = bk_getcpu();
@@ -3269,7 +3425,7 @@ static inline bk_Heap *bk_get_this_thread_heap(void) {
                     _bk_local_thr->heap = bk_global_heap;
                 } else {
                     _bk_local_thr->heap = (bk_Heap*)bk_imalloc(sizeof(bk_Heap));
-                    bk_init_heap(_bk_local_thr->heap, BK_HEAP_THREAD);
+                    bk_init_heap(_bk_local_thr->heap, BK_HEAP_THREAD, NULL);
                 }
 
                 BK_ASSERT(_bk_local_thr->heap != NULL,
@@ -3286,6 +3442,7 @@ static inline bk_Heap *bk_get_this_thread_heap(void) {
     return _bk_local_thr->heap;
 }
 
+#endif /* BKMALLOC_HOOK */
 
 /******************************* @@init *******************************/
 
@@ -3337,16 +3494,18 @@ static inline void bk_init(void) {
 #endif
 
         if (bk_init_config() != 0) { exit(1); }
-
         bk_init_threads();
-
+        bk_init_user_heaps();
+#ifndef BKMALLOC_HOOK
         bk_init_hooks();
+#endif /* BKMALLOC_HOOK */
 
         bk_is_initialized = 1;
 
         bk_spin_unlock(&init_lock);
     }
 }
+
 #endif /* BKMALLOC_HOOK */
 
 
@@ -3358,14 +3517,55 @@ static inline void bk_init(void) {
 extern "C" {
 #endif /* __cplusplus */
 
-BK_ALWAYS_INLINE
-static inline void * _bk_alloc(u64 n_bytes, u64 alignment, int zero_mem) {
-    bk_Heap *heap;
-    void    *addr;
+bk_Heap *bk_heap(const char *name) {
+    bk_Heap  *heap;
+    bk_Heap **heapp;
 
-    heap = unlikely(!bk_is_initialized || !bk_config.per_thread_heaps)
-            ? bk_global_heap
-            : bk_get_this_thread_heap();
+    heap = NULL;
+
+    bk_spin_lock(&bk_user_heaps_lock);
+
+    heapp = hash_table_get_val(bk_user_heaps, name);
+    if (heapp != NULL) {
+        heap = *heapp;
+    } else {
+        heap = (bk_Heap*)bk_imalloc(sizeof(bk_Heap));
+        bk_init_heap(heap, BK_HEAP_USER, name);
+
+        hash_table_insert(bk_user_heaps, heap->user_key, heap);
+    }
+
+    bk_spin_unlock(&bk_user_heaps_lock);
+
+    return heap;
+}
+
+void bk_destroy_heap(const char *name) {
+    bk_Heap **heapp;
+    bk_Heap  *heap;
+
+    bk_spin_lock(&bk_user_heaps_lock);
+
+    heapp = hash_table_get_val(bk_user_heaps, name);
+    if (heapp != NULL) {
+        hash_table_delete(bk_user_heaps, name);
+
+        heap = *heapp;
+        bk_free_heap(heap);
+        bk_ifree(heap);
+    }
+
+    bk_spin_unlock(&bk_user_heaps_lock);
+}
+
+#define BK_GET_HEAP()                                            \
+    (unlikely(!bk_is_initialized || !bk_config.per_thread_heaps) \
+        ? bk_global_heap                                         \
+        : bk_get_this_thread_heap())
+
+BK_ALWAYS_INLINE
+static inline void * _bk_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int zero_mem) {
+    void *addr;
 
     BK_HOOK(pre_alloc, &heap, &n_bytes, &alignment, &zero_mem);
     addr = bk_heap_alloc(heap, n_bytes, alignment, zero_mem);
@@ -3375,34 +3575,34 @@ static inline void * _bk_alloc(u64 n_bytes, u64 alignment, int zero_mem) {
 }
 
 BK_ALWAYS_INLINE
-static inline void * bk_alloc(u64 n_bytes, u64 alignment) {
-    return _bk_alloc(n_bytes, alignment, 0);
+static inline void * bk_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
+    return _bk_alloc(heap, n_bytes, alignment, 0);
 }
 
 BK_ALWAYS_INLINE
-static inline void * bk_zalloc(u64 n_bytes, u64 alignment) {
-    return _bk_alloc(n_bytes, alignment, 1);
+static inline void * bk_zalloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
+    return _bk_alloc(heap, n_bytes, alignment, 1);
 }
 
 BK_ALWAYS_INLINE
-inline void * bk_malloc(size_t n_bytes) {
-    return bk_alloc(n_bytes, MIN_ALIGN);
+inline void * bk_malloc(bk_Heap *heap, size_t n_bytes) {
+    return bk_alloc(heap, n_bytes, MIN_ALIGN);
 }
 
 BK_ALWAYS_INLINE
-inline void * bk_calloc(size_t count, size_t n_bytes) {
-    return bk_zalloc(count * n_bytes, MIN_ALIGN);
+inline void * bk_calloc(bk_Heap *heap, size_t count, size_t n_bytes) {
+    return bk_zalloc(heap, count * n_bytes, MIN_ALIGN);
 }
 
 BK_ALWAYS_INLINE
-inline void * bk_realloc(void *addr, size_t n_bytes) {
+inline void * bk_realloc(bk_Heap *heap, void *addr, size_t n_bytes) {
     void *new_addr;
     u64   old_size;
 
     new_addr = NULL;
 
     if (addr == NULL) {
-        new_addr = bk_alloc(n_bytes, MIN_ALIGN);
+        new_addr = bk_alloc(heap, n_bytes, MIN_ALIGN);
     } else {
         if (likely(n_bytes > 0)) {
             old_size = bk_malloc_size(addr);
@@ -3424,7 +3624,7 @@ inline void * bk_realloc(void *addr, size_t n_bytes) {
                 return addr;
             }
 
-            new_addr = bk_alloc(n_bytes, MIN_ALIGN);
+            new_addr = bk_alloc(heap, n_bytes, MIN_ALIGN);
             memcpy(new_addr, addr, old_size);
         }
 
@@ -3435,13 +3635,13 @@ inline void * bk_realloc(void *addr, size_t n_bytes) {
 }
 
 BK_ALWAYS_INLINE
-inline void * bk_reallocf(void *addr, size_t n_bytes) {
-    return bk_realloc(addr, n_bytes);
+inline void * bk_reallocf(bk_Heap *heap, void *addr, size_t n_bytes) {
+    return bk_realloc(heap, addr, n_bytes);
 }
 
 BK_ALWAYS_INLINE
-inline void * bk_valloc(size_t n_bytes) {
-    return bk_alloc(n_bytes, PAGE_SIZE);
+inline void * bk_valloc(bk_Heap *heap, size_t n_bytes) {
+    return bk_alloc(heap, n_bytes, PAGE_SIZE);
 }
 
 BK_ALWAYS_INLINE
@@ -3460,21 +3660,21 @@ inline void bk_free(void *addr) {
 }
 
 BK_ALWAYS_INLINE
-inline int bk_posix_memalign(void **memptr, size_t alignment, size_t n_bytes) {
+inline int bk_posix_memalign(bk_Heap *heap, void **memptr, size_t alignment, size_t n_bytes) {
     if (unlikely(!IS_POWER_OF_TWO(alignment)
     ||  alignment < sizeof(void*))) {
         return EINVAL;
     }
 
-    *memptr = bk_alloc(n_bytes, alignment);
+    *memptr = bk_alloc(heap, n_bytes, alignment);
 
     if (unlikely(*memptr == NULL))    { return ENOMEM; }
     return 0;
 }
 
 BK_ALWAYS_INLINE
-inline void * bk_aligned_alloc(size_t alignment, size_t size) {
-    return bk_alloc(size, alignment);
+inline void * bk_aligned_alloc(bk_Heap *heap, size_t alignment, size_t size) {
+    return bk_alloc(heap, size, alignment);
 }
 
 BK_ALWAYS_INLINE
@@ -3503,25 +3703,52 @@ inline size_t bk_malloc_size(void *addr) {
     return 0;
 }
 
-
-void * malloc(size_t n_bytes) BK_THROW                                       { return bk_malloc(n_bytes);                         }
-void * calloc(size_t count, size_t n_bytes) BK_THROW                         { return bk_calloc(count, n_bytes);                  }
-void * realloc(void *addr, size_t n_bytes) BK_THROW                          { return bk_realloc(addr, n_bytes);                  }
-void * reallocf(void *addr, size_t n_bytes) BK_THROW                         { return bk_reallocf(addr, n_bytes);                 }
-void * valloc(size_t n_bytes) BK_THROW                                       { return bk_valloc(n_bytes);                         }
-void * pvalloc(size_t n_bytes) BK_THROW                                      { return NULL;                                       }
-void   free(void *addr) BK_THROW                                             { bk_free(addr);                                     }
-int    posix_memalign(void **memptr, size_t alignment, size_t size) BK_THROW { return bk_posix_memalign(memptr, alignment, size); }
-void * aligned_alloc(size_t alignment, size_t size) BK_THROW                 { return bk_aligned_alloc(alignment, size);          }
-void * memalign(size_t alignment, size_t size) BK_THROW                      { return bk_aligned_alloc(alignment, size);;         }
-size_t malloc_size(void *addr) BK_THROW                                      { return bk_malloc_size(addr);                       }
-size_t malloc_usable_size(void *addr) BK_THROW                               { return 0;                                          }
+void * malloc(size_t n_bytes) BK_THROW                                       { return bk_malloc(BK_GET_HEAP(), n_bytes);                         }
+void * calloc(size_t count, size_t n_bytes) BK_THROW                         { return bk_calloc(BK_GET_HEAP(), count, n_bytes);                  }
+void * realloc(void *addr, size_t n_bytes) BK_THROW                          { return bk_realloc(BK_GET_HEAP(), addr, n_bytes);                  }
+void * reallocf(void *addr, size_t n_bytes) BK_THROW                         { return bk_reallocf(BK_GET_HEAP(), addr, n_bytes);                 }
+void * valloc(size_t n_bytes) BK_THROW                                       { return bk_valloc(BK_GET_HEAP(), n_bytes);                         }
+void * pvalloc(size_t n_bytes) BK_THROW                                      { return NULL;                                                      }
+void   free(void *addr) BK_THROW                                             { bk_free(addr);                                                    }
+int    posix_memalign(void **memptr, size_t alignment, size_t size) BK_THROW { return bk_posix_memalign(BK_GET_HEAP(), memptr, alignment, size); }
+void * aligned_alloc(size_t alignment, size_t size) BK_THROW                 { return bk_aligned_alloc(BK_GET_HEAP(), alignment, size);          }
+void * memalign(size_t alignment, size_t size) BK_THROW                      { return bk_aligned_alloc(BK_GET_HEAP(), alignment, size);;         }
+size_t malloc_size(void *addr) BK_THROW                                      { return bk_malloc_size(addr);                                      }
+size_t malloc_usable_size(void *addr) BK_THROW                               { return 0;                                                         }
 
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */
 
 #endif /* BKMALLOC_HOOK */
+
+#undef STR
+#undef _STR
+#undef CAT2
+#undef _CAT2
+#undef CAT3
+#undef _CAT3
+#undef CAT4
+#undef _CAT4
+#undef hash_table
+#undef hash_table_make
+#undef hash_table_make_e
+#undef hash_table_len
+#undef hash_table_free
+#undef hash_table_get_key
+#undef hash_table_get_val
+#undef hash_table_insert
+#undef hash_table_delete
+#undef hash_table_traverse
+#undef _hash_table_slot
+#undef hash_table_slot
+#undef _hash_table
+#undef hash_table
+#undef hash_table_pretty_name
+#undef _HASH_TABLE_EQU
+#undef DEFAULT_START_SIZE_IDX
+#undef use_hash_table
+
 #endif /* defined(BKMALLOC_IMPL) || defined(BKMALLOC_HOOK) */
 
 #endif /* __BKMALLOC_H__ */

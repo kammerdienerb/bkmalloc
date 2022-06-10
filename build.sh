@@ -8,28 +8,24 @@
 ### OPT
     LTO="-flto"
     MARCHTUNE="-march=native -mtune=native"
-    OPT_PASSES="-funroll-loops"
+    OPT_PASSES=""
     LEVEL="-O3"
 #     LEVEL="-O0"
 
     OPT="${LEVEL} ${OPT_PASSES} ${MARCHTUNE} ${LTO}"
 
 ### FEATURES
-    MMAP_OVERRIDE="-DBK_MMAP_OVERRIDE"
-    RETURN_ADDR="-DBK_RETURN_ADDR"
+#     MMAP_OVERRIDE="-DBK_MMAP_OVERRIDE"
+#     RETURN_ADDR="-DBK_RETURN_ADDR"
 #     ASSERT="-DBK_DO_ASSERTIONS"
-    LOG="-DBK_DO_LOGGING"
 
-    FEATURES="${MMAP_OVERRIDE} ${RETURN_ADDR} ${ASSERT} ${LOG}"
+    FEATURES="${MMAP_OVERRIDE} ${RETURN_ADDR} ${ASSERT}"
 
 WARN_FLAGS="-Wall -Wextra -Werror -Wno-missing-field-initializers -Wno-unused-parameter -Wno-unused-function -Wno-unused-value"
 MAX_ERRS="-fmax-errors=3"
-C_FLAGS="-fPIC -ftls-model=initial-exec ${DEBUG} ${OPT} ${WARN_FLAGS} ${MAX_ERRS} ${FEATURES}"
+C_FLAGS="-fPIC ${DEBUG} ${OPT} ${WARN_FLAGS} ${MAX_ERRS} ${FEATURES} -ldl"
 CPP_FLAGS="-fno-rtti ${C_FLAGS}"
 
-COMPILE="gcc -shared -o libbkmalloc.so -x c bkmalloc.h -DBKMALLOC_IMPL ${C_FLAGS}"
-echo ${COMPILE}
-${COMPILE} || exit $?
 COMPILE="g++ -shared -o libbkmalloc.so -x c++ bkmalloc.h -DBKMALLOC_IMPL ${CPP_FLAGS}"
 echo ${COMPILE}
 ${COMPILE} || exit $?
