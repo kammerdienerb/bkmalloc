@@ -1,3 +1,64 @@
+/*
+ * bkmalloc.h
+ * Brandon Kammerdiener
+ * June, 2022
+ *
+ * === What this file provides:
+ *
+ * A performant, tunable, general-purpose malloc implementation.
+ *
+ * A facility for hooking into and controlling allocation events.
+ *
+ * Allocation routines that create/use named "heaps" to colocate and organize
+ * related data.
+ *
+ * === How to build the library:
+ *
+ * Use the provided build.sh, look at it for inspiration, or, at a minimum:
+ *   C only:
+ *     gcc -shared -fPIC -o libbkmalloc.so -x c bkmalloc.h -DBKMALLOC_IMPL -ldl
+ *   With C++ support:
+ *     g++ -shared -fPIC -fno-rtti -o libbkmalloc.so -x c++ bkmalloc.h -DBKMALLOC_IMPL -ldl
+ *
+ * === How to use this file:
+ *
+ * As standard malloc:
+ *     Link program with -lbkmalloc
+ *  OR
+ *     LD_PRELOAD=path/to/libbkmalloc.so
+ *
+ * Embedded in your application:
+ *
+ *     #define BKMALLOC_IMPL
+ *     #include <bkmalloc.h>
+ *
+ * To write a hook:
+ *
+ *   Example myhook.c:
+ *     // Compile: gcc -o myhook.so myhook.c -shared -fPIC -ldl
+ *
+ *     #define BKMALLOC_HOOK
+ *     #include <bkmalloc.h>
+ *
+ *     void pre_alloc(struct bk_Heap **heapp, u64 *n_bytesp, u64 *alignmentp, int *zero_memp) {
+ *         // Do things before allocation.
+ *     }
+ *
+ *   Example myhook.cpp:
+ *     // Compile: g++ -o myhook.so myhook.c -shared -fPIC -ldl
+ *
+ *     #define BKMALLOC_HOOK
+ *     #include <bkmalloc.h>
+ *
+ *     extern "C"
+ *     void block_new(struct bk_Heap *heap, union bk_Block *block) {
+ *         // Do things after a new block has been created.
+ *     }
+ *
+ *   Search "@@hooks" in this file to see the functions that you can hook into bkmalloc.
+ */
+
+
 #ifndef __BKMALLOC_H__
 #define __BKMALLOC_H__
 
@@ -2203,11 +2264,11 @@ union bk_Block;
 
 typedef struct {
     void *handle;
-    void (*block_new)(struct bk_Heap*, union bk_Block*);
-    void (*block_release)(struct bk_Heap*, union bk_Block*);
-    void (*pre_alloc)(struct bk_Heap**, u64*, u64*, int*);
-    void (*post_alloc)(struct bk_Heap**, u64*, u64*, int*, void*);
-    void (*pre_free)(struct bk_Heap*, void*);
+    void (*block_new)(struct bk_Heap*, union bk_Block*);       /* ARGS: heap in, block in                                          */
+    void (*block_release)(struct bk_Heap*, union bk_Block*);   /* ARGS: heap in, block in                                          */
+    void (*pre_alloc)(struct bk_Heap**, u64*, u64*, int*);     /* ARGS: heap inout, n_bytes inout, alignment inout, zero_mem inout */
+    void (*post_alloc)(struct bk_Heap*, u64, u64, int, void*); /* ARGS: heap in, n_bytes in, alignment in, zero_mem in, address in */
+    void (*pre_free)(struct bk_Heap*, void*);                  /* ARGS: heap in, address in                                        */
 } bk_Hooks;
 
 static bk_Hooks bk_hooks;
@@ -3569,7 +3630,7 @@ static inline void * _bk_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int ze
 
     BK_HOOK(pre_alloc, &heap, &n_bytes, &alignment, &zero_mem);
     addr = bk_heap_alloc(heap, n_bytes, alignment, zero_mem);
-    BK_HOOK(post_alloc, &heap, &n_bytes, &alignment, &zero_mem, addr);
+    BK_HOOK(post_alloc, heap, n_bytes, alignment, zero_mem, addr);
 
     return addr;
 }
