@@ -2273,6 +2273,7 @@ typedef struct {
     void (*pre_alloc)(struct bk_Heap**, u64*, u64*, int*);     /* ARGS: heap inout, n_bytes inout, alignment inout, zero_mem inout */
     void (*post_alloc)(struct bk_Heap*, u64, u64, int, void*); /* ARGS: heap in, n_bytes in, alignment in, zero_mem in, address in */
     void (*pre_free)(struct bk_Heap*, void*);                  /* ARGS: heap in, address in                                        */
+    int  unhooked;
 } bk_Hooks;
 
 static bk_Hooks bk_hooks;
@@ -2296,6 +2297,11 @@ static void bk_init_hooks(void) {
     }
 
     bk_hooks.handle = bk_open_library(bk_config.hooks_file ? bk_config.hooks_file : "libbkmalloc.so");
+
+    if (bk_hooks.unhooked) {
+        bk_memzero(&bk_hooks, sizeof(bk_hooks));
+        return;
+    }
 
     if (bk_hooks.handle == NULL) {
         bk_logf("error loading %shooks: %s\n", bk_config.hooks_file ? "" : "built-in ", dlerror());
@@ -3584,6 +3590,11 @@ extern "C" {
 
 void bk_unhook(void) {
     bk_memzero(&bk_hooks, sizeof(bk_hooks));
+    bk_hooks.unhooked = 1;
+
+    if (bk_config.log_hooks) {
+        bk_logf("hooks-unhook\n");
+    }
 }
 
 bk_Heap *bk_heap(const char *name) {
