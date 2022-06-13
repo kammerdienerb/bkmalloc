@@ -2268,11 +2268,15 @@ union bk_Block;
 
 typedef struct {
     void *handle;
-    void (*block_new)(struct bk_Heap*, union bk_Block*);       /* ARGS: heap in, block in                                          */
-    void (*block_release)(struct bk_Heap*, union bk_Block*);   /* ARGS: heap in, block in                                          */
-    void (*pre_alloc)(struct bk_Heap**, u64*, u64*, int*);     /* ARGS: heap inout, n_bytes inout, alignment inout, zero_mem inout */
-    void (*post_alloc)(struct bk_Heap*, u64, u64, int, void*); /* ARGS: heap in, n_bytes in, alignment in, zero_mem in, address in */
-    void (*pre_free)(struct bk_Heap*, void*);                  /* ARGS: heap in, address in                                        */
+    void (*block_new)(struct bk_Heap*, union bk_Block*);           /* ARGS: heap in, block in                                                    */
+    void (*block_release)(struct bk_Heap*, union bk_Block*);       /* ARGS: heap in, block in                                                    */
+    void (*pre_alloc)(struct bk_Heap**, u64*, u64*, int*);         /* ARGS: heap inout, n_bytes inout, alignment inout, zero_mem inout           */
+    void (*post_alloc)(struct bk_Heap*, u64, u64, int, void*);     /* ARGS: heap in, n_bytes in, alignment in, zero_mem in, address in           */
+    void (*pre_free)(struct bk_Heap*, void*);                      /* ARGS: heap in, address in                                                  */
+#ifdef BK_MMAP_OVERRIDE
+    void (*post_mmap)(void*, size_t, int, int, int, off_t, void*); /* ARGS: addr in, length in, prot in, flags in, fd in, offset in, ret_addr in */
+    void (*post_munmap)(void*, size_t);                            /* ARGS: addr in, length in                                                   */
+#endif
     int  unhooked;
 } bk_Hooks;
 
@@ -2325,6 +2329,10 @@ do {                                                                            
     INSTALL_HOOK(pre_alloc);
     INSTALL_HOOK(post_alloc);
     INSTALL_HOOK(pre_free);
+#ifdef BK_MMAP_OVERRIDE
+    INSTALL_HOOK(post_mmap);
+    INSTALL_HOOK(post_munmap);
+#endif
 
 #undef INSTALL_HOOK
 }
@@ -3795,6 +3803,35 @@ void * aligned_alloc(size_t alignment, size_t size) BK_THROW                 { r
 void * memalign(size_t alignment, size_t size) BK_THROW                      { return bk_aligned_alloc(BK_GET_HEAP(), alignment, size);;         }
 size_t malloc_size(void *addr) BK_THROW                                      { return bk_malloc_size(addr);                                      }
 size_t malloc_usable_size(void *addr) BK_THROW                               { return 0;                                                         }
+
+#ifdef BK_MMAP_OVERRIDE
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    long  ret;
+    void *ret_addr;
+
+    ret      = syscall(SYS_mmap, addr, length, prot, flags, fd, offset);
+    ret_addr = (void*)ret;
+
+    if (ret_addr != MAP_FAILED) {
+        BK_HOOK(post_mmap, addr, length, prot, flags, fd, offset, ret_addr);
+    }
+
+    return ret_addr;
+}
+
+int munmap(void *addr, size_t length) {
+    long ret;
+
+    ret = syscall(SYS_munmap, addr, length);
+
+    if (ret == 0) {
+        BK_HOOK(post_munmap, addr, length);
+    }
+
+    return ret;
+}
+#endif /* BK_MMAP_OVERRIDE */
+
 
 #ifdef __cplusplus
 }
