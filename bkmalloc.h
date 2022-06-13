@@ -77,6 +77,10 @@ extern "C" {
 struct bk_Heap *bk_heap(const char *name);
 void            bk_destroy_heap(const char *name);
 
+#ifdef BKMALLOC_HOOK
+void bk_unhook(void);
+#endif
+
 void * bk_malloc(struct bk_Heap *heap, size_t n_bytes);
 void * bk_calloc(struct bk_Heap *heap, size_t count, size_t n_bytes);
 void * bk_realloc(struct bk_Heap *heap, void *addr, size_t n_bytes);
@@ -3577,6 +3581,10 @@ static inline void bk_init(void) {
 #ifdef __cplusplus
 extern "C" {
 #endif /* __cplusplus */
+
+void bk_unhook(void) {
+    bk_memzero(&bk_hooks, sizeof(bk_hooks));
+}
 
 bk_Heap *bk_heap(const char *name) {
     bk_Heap  *heap;
