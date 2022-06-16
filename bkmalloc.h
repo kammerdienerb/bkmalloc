@@ -3672,18 +3672,15 @@ static inline void * bk_zalloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
     return _bk_alloc(heap, n_bytes, alignment, 1);
 }
 
-BK_ALWAYS_INLINE
-inline void * bk_malloc(bk_Heap *heap, size_t n_bytes) {
+void * bk_malloc(bk_Heap *heap, size_t n_bytes) {
     return bk_alloc(heap, n_bytes, MIN_ALIGN);
 }
 
-BK_ALWAYS_INLINE
-inline void * bk_calloc(bk_Heap *heap, size_t count, size_t n_bytes) {
+void * bk_calloc(bk_Heap *heap, size_t count, size_t n_bytes) {
     return bk_zalloc(heap, count * n_bytes, MIN_ALIGN);
 }
 
-BK_ALWAYS_INLINE
-inline void * bk_realloc(bk_Heap *heap, void *addr, size_t n_bytes) {
+void * bk_realloc(bk_Heap *heap, void *addr, size_t n_bytes) {
     void *new_addr;
     u64   old_size;
 
@@ -3722,18 +3719,15 @@ inline void * bk_realloc(bk_Heap *heap, void *addr, size_t n_bytes) {
     return new_addr;
 }
 
-BK_ALWAYS_INLINE
-inline void * bk_reallocf(bk_Heap *heap, void *addr, size_t n_bytes) {
+void * bk_reallocf(bk_Heap *heap, void *addr, size_t n_bytes) {
     return bk_realloc(heap, addr, n_bytes);
 }
 
-BK_ALWAYS_INLINE
-inline void * bk_valloc(bk_Heap *heap, size_t n_bytes) {
+void * bk_valloc(bk_Heap *heap, size_t n_bytes) {
     return bk_alloc(heap, n_bytes, PAGE_SIZE);
 }
 
-BK_ALWAYS_INLINE
-inline void bk_free(void *addr) {
+void bk_free(void *addr) {
     bk_Block *block;
     bk_Heap  *heap;
 
@@ -3747,8 +3741,7 @@ inline void bk_free(void *addr) {
     }
 }
 
-BK_ALWAYS_INLINE
-inline int bk_posix_memalign(bk_Heap *heap, void **memptr, size_t alignment, size_t n_bytes) {
+int bk_posix_memalign(bk_Heap *heap, void **memptr, size_t alignment, size_t n_bytes) {
     if (unlikely(!IS_POWER_OF_TWO(alignment)
     ||  alignment < sizeof(void*))) {
         return EINVAL;
@@ -3760,13 +3753,11 @@ inline int bk_posix_memalign(bk_Heap *heap, void **memptr, size_t alignment, siz
     return 0;
 }
 
-BK_ALWAYS_INLINE
-inline void * bk_aligned_alloc(bk_Heap *heap, size_t alignment, size_t size) {
+void * bk_aligned_alloc(bk_Heap *heap, size_t alignment, size_t size) {
     return bk_alloc(heap, size, alignment);
 }
 
-BK_ALWAYS_INLINE
-inline size_t bk_malloc_size(void *addr) {
+size_t bk_malloc_size(void *addr) {
     bk_Block *block;
     bk_Chunk *chunk;
 
