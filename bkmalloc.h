@@ -277,14 +277,15 @@ void operator delete[](void* ptr, std::size_t size, std::align_val_t alignment) 
 char *getenv(const char *name);
 void  exit(int status);
 
-#define MIN_ALIGN                   (16ULL)
-#define BK_BLOCK_SIZE               (MB(1))
-#define BK_BLOCK_ALIGN              (MB(1))
-#define BK_BASE_SIZE_CLASS          (MIN_ALIGN)
-#define BK_NR_SIZE_CLASSES          (LOG2_64BIT(BK_BLOCK_SIZE / BK_BASE_SIZE_CLASS) - 1)
-#define BK_MAX_BLOCK_ALLOC_SIZE     (BK_BASE_SIZE_CLASS * (1 << (BK_NR_SIZE_CLASSES - 1)))
-#define BK_BIG_ALLOC_SIZE_CLASS     (0xFFFFFFFF)
-#define BK_BIG_ALLOC_SIZE_CLASS_IDX (0xFFFFFFFF)
+#define MIN_ALIGN                               (16ULL)
+#define BK_BLOCK_SIZE                           (MB(1))
+#define BK_BLOCK_ALIGN                          (MB(1))
+#define BK_BASE_SIZE_CLASS                      (MIN_ALIGN)
+#define BK_NR_SIZE_CLASSES                      (LOG2_64BIT(BK_BLOCK_SIZE / BK_BASE_SIZE_CLASS) - 1)
+#define BK_MAX_BLOCK_ALLOC_SIZE                 (BK_BASE_SIZE_CLASS * (1 << (BK_NR_SIZE_CLASSES - 1)))
+#define BK_BIG_ALLOC_SIZE_CLASS                 (0xFFFFFFFF)
+#define BK_BIG_ALLOC_SIZE_CLASS_IDX             (0xFFFFFFFF)
+#define BK_REQUEST_NEEDS_BIG_ALLOC(_sz, _a, _z) (unlikely((_sz) > BK_MAX_BLOCK_ALLOC_SIZE) || ((_z) && (_sz) >= KB(16)))
 
 #ifndef BKMALLOC_HOOK
 static inline void bk_init(void);
@@ -3329,14 +3330,15 @@ static inline void * bk_heap_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, in
 
     mem = NULL;
 
-    if (unlikely(n_bytes > BK_MAX_BLOCK_ALLOC_SIZE)
-    ||  (zero_mem && n_bytes >= KB(16))) {
+    if (BK_REQUEST_NEEDS_BIG_ALLOC(n_bytes, alignment, zero_mem)) {
+
         BK_HOOK(pre_alloc, &heap, &n_bytes, &alignment, &zero_mem);
 
         mem = bk_big_alloc(heap, n_bytes, alignment, zero_mem, &block);
         /* Zeroing the memory will be handled for us for big allocs */
         zero_mem = 0;
         goto out;
+
     } else if (!IS_ALIGNED(n_bytes, MIN_ALIGN)) {
         n_bytes = ALIGN_UP(n_bytes, MIN_ALIGN);
     } else if (unlikely(n_bytes == 0)) {
