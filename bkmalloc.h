@@ -2352,20 +2352,31 @@ do {                                                                            
 #define BK_CHUNK_IS_FREE   (1ULL << 0ULL)
 #define BK_CHUNK_IS_BIG    (1ULL << 1ULL)
 #define BK_CHUNK_BEEN_USED (1ULL << 2ULL)
+#define BK_HOOK_FLAG_0     (1ULL << 3ULL)
+#define BK_HOOK_FLAG_1     (1ULL << 4ULL)
+#define BK_HOOK_FLAG_2     (1ULL << 5ULL)
+#define BK_HOOK_FLAG_3     (1ULL << 6ULL)
+#define BK_HOOK_FLAG_4     (1ULL << 7ULL)
+#define BK_HOOK_FLAG_5     (1ULL << 8ULL)
+#define BK_HOOK_FLAG_6     (1ULL << 9ULL)
+#define BK_HOOK_FLAG_7     (1ULL << 10ULL)
+#define BK_HOOK_FLAG_8     (1ULL << 11ULL)
+#define BK_HOOK_FLAG_9     (1ULL << 12ULL)
+#define BK_HOOK_FLAG_10    (1ULL << 13ULL)
 
-#define BK_CHUNK_MAGIC (0xCA57)
+#define BK_CHUNK_MAGIC (0x22)
 
 typedef union {
     struct {
-        u64 magic        : 16;
+        u64 magic        : 8;
         u64 offset_next  : 20;
         u64 size         : 25;
-        u64 flags        : 3;
+        u64 flags        : 11;
     };
     struct {
-        u64 big_magic    : 16;
+        u64 big_magic    : 8;
         u64 big_size     : 45;
-        u64 big_flags    : 3;
+        u64 big_flags    : 11;
     };
 } bk_Chunk_Header;
 
