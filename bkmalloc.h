@@ -3320,6 +3320,8 @@ static inline void * bk_heap_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, in
 
     if (unlikely(n_bytes > BK_MAX_BLOCK_ALLOC_SIZE)
     ||  (zero_mem && n_bytes >= KB(16))) {
+        BK_HOOK(pre_alloc, &heap, &n_bytes, &alignment, &zero_mem);
+
         mem = bk_big_alloc(heap, n_bytes, alignment, zero_mem, &block);
         /* Zeroing the memory will be handled for us for big allocs */
         zero_mem = 0;
@@ -3329,6 +3331,8 @@ static inline void * bk_heap_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, in
     } else if (unlikely(n_bytes == 0)) {
         n_bytes = MIN_ALIGN;
     }
+
+    BK_HOOK(pre_alloc, &heap, &n_bytes, &alignment, &zero_mem);
 
     size_class_idx = bk_get_size_class_idx(n_bytes);
 
@@ -3380,6 +3384,8 @@ out:;
             bk_memzero(mem, n_bytes);
         }
     }
+
+    BK_HOOK(post_alloc, heap, n_bytes, alignment, zero_mem, mem);
 
     if (bk_config.log_allocs) {
         bk_logf("alloc 0x%X heap %u size %U align %U\n", mem, heap->hid, n_bytes, alignment);
@@ -3655,9 +3661,7 @@ BK_ALWAYS_INLINE
 static inline void * _bk_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int zero_mem) {
     void *addr;
 
-    BK_HOOK(pre_alloc, &heap, &n_bytes, &alignment, &zero_mem);
     addr = bk_heap_alloc(heap, n_bytes, alignment, zero_mem);
-    BK_HOOK(post_alloc, heap, n_bytes, alignment, zero_mem, addr);
 
     return addr;
 }
