@@ -277,10 +277,10 @@ void operator delete[](void* ptr, std::size_t size, std::align_val_t alignment) 
 char *getenv(const char *name);
 void  exit(int status);
 
-#define MIN_ALIGN                               (16ULL)
+#define BK_MIN_ALIGN                            (16ULL)
 #define BK_BLOCK_SIZE                           (MB(1))
 #define BK_BLOCK_ALIGN                          (MB(1))
-#define BK_BASE_SIZE_CLASS                      (MIN_ALIGN)
+#define BK_BASE_SIZE_CLASS                      (BK_MIN_ALIGN)
 #define BK_NR_SIZE_CLASSES                      (LOG2_64BIT(BK_BLOCK_SIZE / BK_BASE_SIZE_CLASS) - 1)
 #define BK_MAX_BLOCK_ALLOC_SIZE                 (BK_BASE_SIZE_CLASS * (1 << (BK_NR_SIZE_CLASSES - 1)))
 #define BK_BIG_ALLOC_SIZE_CLASS                 (0xFFFFFFFF)
@@ -319,12 +319,12 @@ static inline void bk_init(void);
 #define BK_ALWAYS_INLINE __attribute__((always_inline))
 #endif /* BK_DEBUG */
 
-#define HOT __attribute__((hot))
+#define BK_HOT __attribute__((hot))
 
-#define GLOBAL_ALIGN(_a) __attribute__((aligned((_a))))
-#define FIELD_ALIGN(_a)  __attribute__((aligned((_a))))
-#define PACKED           __attribute__((packed))
-#define THREAD_LOCAL     __thread
+#define BK_GLOBAL_ALIGN(_a) __attribute__((aligned((_a))))
+#define BK_FIELD_ALIGN(_a)  __attribute__((aligned((_a))))
+#define BK_PACKED           __attribute__((packed))
+#define BK_THREAD_LOCAL     __thread
 
 #define XOR_SWAP_64(a, b) do {   \
     a = ((u64)(a)) ^ ((u64)(b)); \
@@ -408,7 +408,7 @@ do { if (unlikely(!(cond))) {                       \
 
 BK_ALWAYS_INLINE
 static inline void bk_memzero(void *addr, u64 size) {
-    __builtin_memset(__builtin_assume_aligned(addr, MIN_ALIGN), 0, size);
+    __builtin_memset(__builtin_assume_aligned(addr, BK_MIN_ALIGN), 0, size);
 }
 
 
@@ -2106,6 +2106,7 @@ lazy_comma = ", ";
 
 }
 
+#undef LIST_GC_POLICIES
 
 static int bk_init_config(void) {
     int         status;
@@ -2343,10 +2344,10 @@ do {                                                                            
 /******************************* @@blocks *******************************/
 
 
-#define ADDR_PARENT_BLOCK(addr) \
+#define BK_ADDR_PARENT_BLOCK(addr) \
     ((bk_Block*)(void*)(ALIGN_DOWN(((u64)addr), BK_BLOCK_ALIGN)))
 
-#define BLOCK_GET_HEAP_PTR(b) \
+#define BK_BLOCK_GET_HEAP_PTR(b) \
     ((struct bk_Heap*)((b)->meta.heap))
 
 
@@ -2386,27 +2387,27 @@ typedef union {
     u64             __u64;
 } bk_Chunk;
 
-#define CHUNK_NEXT(addr)                                                  \
+#define BK_CHUNK_NEXT(addr)                                                  \
     ((bk_Chunk*)((unlikely(((bk_Chunk*)(addr))->header.offset_next == 0)) \
         ? NULL                                                            \
         :   ((u8*)(addr))                                                 \
           + (((bk_Chunk*)(addr))->header.offset_next)))
 
-#define CHUNK_NEXT_UNCHECKED(addr)                                        \
+#define BK_CHUNK_NEXT_UNCHECKED(addr)                                        \
     ((bk_Chunk*)(((u8*)(addr))                                            \
         + (((bk_Chunk*)(addr))->header.offset_next)))
 
-#define CHUNK_HAS_PREV(addr) (((bk_Chunk*)(addr))->header.offset_prev != 0)
-#define CHUNK_HAS_NEXT(addr) (((bk_Chunk*)(addr))->header.offset_next != 0)
+#define BK_CHUNK_HAS_PREV(addr) (((bk_Chunk*)(addr))->header.offset_prev != 0)
+#define BK_CHUNK_HAS_NEXT(addr) (((bk_Chunk*)(addr))->header.offset_next != 0)
 
-#define CHUNK_USER_MEM(addr) ((void*)(((u8*)(addr)) + sizeof(bk_Chunk)))
+#define BK_CHUNK_USER_MEM(addr) ((void*)(((u8*)(addr)) + sizeof(bk_Chunk)))
 
-#define CHUNK_FROM_USER_MEM(addr) ((bk_Chunk*)(((u8*)(addr)) - sizeof(bk_Chunk)))
+#define BK_CHUNK_FROM_USER_MEM(addr) ((bk_Chunk*)(((u8*)(addr)) - sizeof(bk_Chunk)))
 
-#define CHUNK_DISTANCE(a, b) (((u8*)(a)) - (((u8*)(b))))
+#define BK_CHUNK_DISTANCE(a, b) (((u8*)(a)) - (((u8*)(b))))
 
-#define CHUNK_PARENT_BLOCK(addr) \
-    ADDR_PARENT_BLOCK(addr)
+#define BK_CHUNK_PARENT_BLOCK(addr) \
+    BK_ADDR_PARENT_BLOCK(addr)
 
 
 typedef struct {
@@ -2418,36 +2419,37 @@ typedef struct {
 
 #define BK_REGION_FULL      (1ULL)
 #define BK_SLOT_TAKEN       (1ULL)
-#define BK_SLOT_TOUCHED     (1ULL)
 #define BK_ALL_REGIONS_FULL (0xFFFFFFFFFFFFFFFF)
 #define BK_ALL_SLOTS_TAKEN  (0xFFFFFFFFFFFFFFFF)
 
-#define GET_SLOT_BITFIELD(_slots, _r)         ((_slots).slots_bitfields[(_r) << 1ULL])
-#define GET_SLOT_TOUCHED_BITFIELD(_slots, _r) ((_slots).slots_bitfields[((_r) << 1ULL) + 1])
+#define BK_GET_SLOT_BITFIELD(_slots, _r)      ((_slots).slots_bitfields[(_r) << 1ULL])
+#define BK_GET_SLOT_HOOK_BITFIELD(_slots, _r) ((_slots).slots_bitfields[((_r) << 1ULL) + 1])
 
-#define GET_REGION_BIT(_slots, _r) \
+#define BK_GET_REGION_BIT(_slots, _r) \
     (!!((_slots).regions_bitfield & (1ULL << (63ULL - (_r)))))
-#define SET_REGION_BIT_FULL(_slots, _r) \
+#define BK_SET_REGION_BIT_FULL(_slots, _r) \
     ((_slots).regions_bitfield |= (BK_REGION_FULL << (63ULL - (_r))))
-#define SET_REGION_BIT_NOT_FULL(_slots, _r) \
+#define BK_SET_REGION_BIT_NOT_FULL(_slots, _r) \
     ((_slots).regions_bitfield &= ~(BK_REGION_FULL << (63ULL - (_r))))
 
-#define GET_SLOT_BIT(_slots, _r, _s) \
-    (!!(GET_SLOT_BITFIELD((_slots), (_r)) & (1ULL << (63ULL - (_s)))))
-#define SET_SLOT_BIT_TAKEN(_slots, _r, _s) \
-    (GET_SLOT_BITFIELD((_slots), (_r)) |= (BK_SLOT_TAKEN << (63ULL - (_s))))
-#define SET_SLOT_BIT_FREE(_slots, _r, _s) \
-    (GET_SLOT_BITFIELD((_slots), (_r)) &= ~(BK_SLOT_TAKEN << (63ULL - (_s))))
+#define BK_GET_SLOT_BIT(_slots, _r, _s) \
+    (!!(BK_GET_SLOT_BITFIELD((_slots), (_r)) & (1ULL << (63ULL - (_s)))))
+#define BK_SET_SLOT_BIT_TAKEN(_slots, _r, _s) \
+    (BK_GET_SLOT_BITFIELD((_slots), (_r)) |= (BK_SLOT_TAKEN << (63ULL - (_s))))
+#define BK_SET_SLOT_BIT_FREE(_slots, _r, _s) \
+    (BK_GET_SLOT_BITFIELD((_slots), (_r)) &= ~(BK_SLOT_TAKEN << (63ULL - (_s))))
 
-#define GET_SLOT_TOUCHED_BIT(_slots, _r, _s) \
-    (!!(GET_SLOT_TOUCHED_BITFIELD((_slots), (_r)) & (1ULL << (63ULL - (_s)))))
-#define SET_SLOT_BIT_TOUCHED(_slots, _r, _s) \
-    (GET_SLOT_TOUCHED_BITFIELD((_slots), (_r)) |= (BK_SLOT_TOUCHED << (63ULL - (_s))))
+#define BK_GET_SLOT_HOOK_BIT(_slots, _r, _s) \
+    (!!(BK_GET_SLOT_HOOK_BITFIELD((_slots), (_r)) & (1ULL << (63ULL - (_s)))))
+#define BK_SET_SLOT_HOOK_BIT(_slots, _r, _s) \
+    (BK_GET_SLOT_HOOK_BITFIELD((_slots), (_r)) |= (1ULL << (63ULL - (_s))))
+#define BK_CLEAR_SLOT_HOOK_BIT(_slots, _r, _s) \
+    (BK_GET_SLOT_HOOK_BITFIELD((_slots), (_r)) &= ~(1ULL << (63ULL - (_s))))
 
 
 union bk_Block;
 
-typedef struct PACKED {
+typedef struct BK_PACKED {
     struct bk_Heap *heap;
     void           *end;
     u64             size;
@@ -2472,15 +2474,15 @@ typedef struct PACKED {
                          - BK_CHUNK_SPACE            \
                          - sizeof(bk_Slots))
 
-typedef union PACKED bk_Block {
-    struct PACKED {
+typedef union BK_PACKED bk_Block {
+    struct BK_PACKED {
         bk_Block_Metadata meta;
         u8                _chunk_space[BK_CHUNK_SPACE];
         bk_Slots          slots;
         u8                _slot_space[BK_SLOT_SPACE];
-    } PACKED;
+    } BK_PACKED;
     u8 _bytes[BK_BLOCK_SIZE];
-} PACKED bk_Block;
+} BK_PACKED bk_Block;
 
 #define BK_BLOCK_FIRST_CHUNK(_block) \
     ((bk_Chunk*)((_block)->_bytes + offsetof(bk_Block, _chunk_space)))
@@ -2528,7 +2530,7 @@ static bk_Heap _bk_global_heap = {
 
 #endif
 
-GLOBAL_ALIGN(CACHE_LINE)
+BK_GLOBAL_ALIGN(CACHE_LINE)
 static bk_Heap *bk_global_heap = &_bk_global_heap;
 
 
@@ -2537,7 +2539,7 @@ static inline u32 bk_get_size_class_idx(u64 size) {
     u64 shift;
     u32 size_class_idx;
 
-    size = MAX(MIN_ALIGN, size);
+    size = MAX(BK_MIN_ALIGN, size);
 
     shift          = 64ULL - 1 - CLZ(size);
     size_class_idx = ((size == (1ULL << shift)) ? shift : shift + 1ULL) - LOG2_64BIT(BK_BASE_SIZE_CLASS);
@@ -2554,6 +2556,23 @@ static inline u64 bk_size_class_idx_to_size(u32 idx) {
     return (1ULL << (LOG2_SIZE_CLASS_FROM_IDX(idx)));
 }
 
+BK_ALWAYS_INLINE
+static inline int bk_addr_to_region_and_slot(void *addr, u32 *rp, u32 *sp) {
+    bk_Block *block;
+    u32       idx;
+
+    block = BK_ADDR_PARENT_BLOCK(addr);
+
+    if ((u8*)addr >= block->_slot_space && (u8*)addr < (u8*)block->meta.bump_base) {
+        idx = ((u8*)addr - block->_slot_space) >> block->meta.log2_size_class;
+        *rp = idx >> 6ULL;
+        *sp = idx  & 63ULL;
+
+        return 1;
+    }
+
+    return 0;
+}
 
 #ifndef BKMALLOC_HOOK
 
@@ -2932,24 +2951,24 @@ static inline void bk_gc_block(bk_Heap *heap, bk_Block *block) {
     BK_ASSERT(chunk->header.magic == BK_CHUNK_MAGIC,
               "chunk bad magic");
 
-    while (CHUNK_HAS_NEXT(chunk)) {
-        next = CHUNK_NEXT(chunk);
+    while (BK_CHUNK_HAS_NEXT(chunk)) {
+        next = BK_CHUNK_NEXT(chunk);
 
         BK_ASSERT(next->header.magic == BK_CHUNK_MAGIC,
                   "next bad magic");
 
         if (chunk->header.flags & next->header.flags & BK_CHUNK_IS_FREE) {
-            next_next = CHUNK_NEXT(next);
+            next_next = BK_CHUNK_NEXT(next);
 
             BK_ASSERT(next->header.magic == BK_CHUNK_MAGIC,
                       "next_next bad magic");
 
-            chunk->header.size = CHUNK_DISTANCE(next, chunk) + next->header.size;
+            chunk->header.size = BK_CHUNK_DISTANCE(next, chunk) + next->header.size;
 
             if (next_next == NULL) {
                 chunk->header.offset_next = 0;
             } else {
-                chunk->header.offset_next = CHUNK_DISTANCE(next_next, chunk);
+                chunk->header.offset_next = BK_CHUNK_DISTANCE(next_next, chunk);
             }
 
             BK_ASSERT((u8*)chunk + sizeof(bk_Chunk) + chunk->header.size <= block->_chunk_space + BK_CHUNK_SPACE,
@@ -3068,8 +3087,8 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
     bk_Chunk *next;
     bk_Chunk *split;
 
-    BK_ASSERT(IS_ALIGNED(n_bytes, MIN_ALIGN),
-              "n_bytes is not aligned to MIN_ALIGN");
+    BK_ASSERT(IS_ALIGNED(n_bytes, BK_MIN_ALIGN),
+              "n_bytes is not aligned to BK_MIN_ALIGN");
 
     BK_ASSERT(n_bytes <= block->meta.size_class,
               "n_bytes too large");
@@ -3078,7 +3097,7 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
 
     while (chunk != NULL) {
         if (chunk->header.flags & BK_CHUNK_IS_FREE) {
-            addr    = CHUNK_USER_MEM(chunk);
+            addr    = BK_CHUNK_USER_MEM(chunk);
             end     = (void*)((u8*)addr + chunk->header.size);
             aligned = addr;
 
@@ -3092,28 +3111,28 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
             used_end = (u8*)aligned + n_bytes;
 
             if ((u8*)used_end <= (u8*)end) {
-                next = CHUNK_NEXT(chunk);
+                next = BK_CHUNK_NEXT(chunk);
 
                 if (aligned != addr) {
                     BK_ASSERT((u64)((u8*)aligned - (u8*)addr) >= sizeof(bk_Chunk) + block->meta.size_class,
                               "aligned doesn't leave enough space to split");
 
-                    split = CHUNK_FROM_USER_MEM(aligned);
+                    split = BK_CHUNK_FROM_USER_MEM(aligned);
 
                     split->header.magic       = BK_CHUNK_MAGIC;
                     split->header.flags       = chunk->header.flags;
                     split->header.size        = (u8*)end - (u8*)aligned;
                     split->header.offset_next = next == NULL
                                                     ? 0
-                                                    : CHUNK_DISTANCE(next, split);
-                    chunk->header.offset_next = CHUNK_DISTANCE(split, chunk);
+                                                    : BK_CHUNK_DISTANCE(next, split);
+                    chunk->header.offset_next = BK_CHUNK_DISTANCE(split, chunk);
                     chunk->header.size        = (u8*)split - (u8*)addr;
 
                     BK_ASSERT(CHUNK_NEXT(chunk) == split,
                               "bad split link left");
                     BK_ASSERT((u8*)chunk + sizeof(bk_Chunk) + chunk->header.size == (u8*)split,
                               "bad split left size");
-                    BK_ASSERT(next == NULL || CHUNK_NEXT(split) == next,
+                    BK_ASSERT(next == NULL || BK_CHUNK_NEXT(split) == next,
                               "bad split right");
                     BK_ASSERT(next == NULL || (u8*)split + sizeof(bk_Chunk) + split->header.size == (u8*)next,
                               "bad split right size");
@@ -3127,18 +3146,18 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
                     chunk = split;
                 }
 
-                potential_next = ALIGN_UP((u8*)used_end, MIN_ALIGN);
+                potential_next = ALIGN_UP((u8*)used_end, BK_MIN_ALIGN);
 
                 if ((u8*)potential_next > (u8*)end
                 &&  (u64)((u8*)end - (u8*)potential_next) >= block->meta.size_class) {
 
-                    split = CHUNK_FROM_USER_MEM(potential_next);
+                    split = BK_CHUNK_FROM_USER_MEM(potential_next);
 
                     BK_ASSERT(split > chunk,
                               "bad split point");
 
                     if (next != NULL) {
-                        split->header.offset_next = CHUNK_DISTANCE(next, split);
+                        split->header.offset_next = BK_CHUNK_DISTANCE(next, split);
                     } else {
                         split->header.offset_next = 0;
                     }
@@ -3146,14 +3165,14 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
                     split->header.magic       = BK_CHUNK_MAGIC;
                     split->header.flags       = chunk->header.flags;
                     split->header.size        = ((u8*)end - (u8*)potential_next);
-                    chunk->header.offset_next = CHUNK_DISTANCE(split, chunk);
-                    chunk->header.size        = ((u8*)split - (u8*)CHUNK_USER_MEM(chunk));
+                    chunk->header.offset_next = BK_CHUNK_DISTANCE(split, chunk);
+                    chunk->header.size        = ((u8*)split - (u8*)BK_CHUNK_USER_MEM(chunk));
 
                     BK_ASSERT((u8*)chunk + sizeof(bk_Chunk) + chunk->header.size == (u8*)split,
                               "bad split left size");
                     BK_ASSERT((u8*)split + sizeof(bk_Chunk) + split->header.size == (u8*)end,
                               "bad split right size");
-                    BK_ASSERT(CHUNK_NEXT(chunk) == split,
+                    BK_ASSERT(BK_CHUNK_NEXT(chunk) == split,
                               "bad split link right");
                     BK_ASSERT(next != NULL || (u8*)split + sizeof(bk_Chunk) + split->header.size == block->_chunk_space + BK_CHUNK_SPACE,
                               "right split has no next, but doesn't span rest of chunk space");
@@ -3165,7 +3184,7 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
 
                 chunk->header.flags &= ~BK_CHUNK_IS_FREE;
 
-                BK_ASSERT((u8*)CHUNK_USER_MEM(chunk) + chunk->header.size <= block->_chunk_space + BK_CHUNK_SPACE,
+                BK_ASSERT((u8*)BK_CHUNK_USER_MEM(chunk) + chunk->header.size <= block->_chunk_space + BK_CHUNK_SPACE,
                           "chunk goes beyond chunk space");
                 BK_ASSERT((u8*)aligned + n_bytes <= block->_chunk_space + BK_CHUNK_SPACE,
                           "chunk allocation goes beyond chunk space");
@@ -3173,7 +3192,7 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
                 return aligned;
             }
         }
-        chunk = CHUNK_NEXT(chunk);
+        chunk = BK_CHUNK_NEXT(chunk);
     }
 
     block->meta.all_chunks_used = 1;
@@ -3211,15 +3230,15 @@ static inline void * bk_alloc_slot(bk_Heap *heap, bk_Block *block) {
               "slots remain, but all regions marked full");
 
     r = CLZ(~block->slots.regions_bitfield);
-    s = CLZ(~GET_SLOT_BITFIELD(block->slots, r));
+    s = CLZ(~BK_GET_SLOT_BITFIELD(block->slots, r));
 
-    BK_ASSERT(GET_SLOT_BIT(block->slots, r, s) != BK_SLOT_TAKEN,
+    BK_ASSERT(BK_GET_SLOT_BIT(block->slots, r, s) != BK_SLOT_TAKEN,
               "slot already taken");
 
-    SET_SLOT_BIT_TAKEN(block->slots, r, s);
+    BK_SET_SLOT_BIT_TAKEN(block->slots, r, s);
 
-    if (GET_SLOT_BITFIELD(block->slots, r) == BK_ALL_SLOTS_TAKEN) {
-        SET_REGION_BIT_FULL(block->slots, r);
+    if (BK_GET_SLOT_BITFIELD(block->slots, r) == BK_ALL_SLOTS_TAKEN) {
+        BK_SET_REGION_BIT_FULL(block->slots, r);
     }
 
     addr = block->_slot_space + (((r << 6ULL) + s) << block->meta.log2_size_class);
@@ -3242,14 +3261,13 @@ static inline void bk_free_slot(bk_Heap *heap, bk_Block *block, void *addr) {
     region = idx >> 6ULL;
     slot   = idx  & 63ULL;
 
-    BK_ASSERT(GET_SLOT_BIT(block->slots, region, slot) == BK_SLOT_TAKEN,
+    BK_ASSERT(BK_GET_SLOT_BIT(block->slots, region, slot) == BK_SLOT_TAKEN,
               "slot was not taken");
     BK_ASSERT(block->slots.n_allocations != 0,
               "slot taken, but n_allocations is 0");
 
-    SET_SLOT_BIT_TOUCHED(block->slots, region, slot);
-    SET_SLOT_BIT_FREE(block->slots, region, slot);
-    SET_REGION_BIT_NOT_FULL(block->slots, region);
+    BK_SET_SLOT_BIT_FREE(block->slots, region, slot);
+    BK_SET_REGION_BIT_NOT_FULL(block->slots, region);
     block->slots.n_allocations -= 1;
 }
 
@@ -3276,9 +3294,9 @@ static inline void * bk_alloc_from_block(bk_Heap *heap, bk_Block *block, u64 n_b
 
     /* From bump space? */
     if (!bk_config.disable_bump) {
-        mem = ALIGN_UP(block->meta.bump, MAX(MIN_ALIGN, alignment));
+        mem = ALIGN_UP(block->meta.bump, MAX(BK_MIN_ALIGN, alignment));
         if ((u8*)mem + n_bytes <= (u8*)block + BK_BLOCK_SIZE) {
-            chunk = CHUNK_FROM_USER_MEM(mem);
+            chunk = BK_CHUNK_FROM_USER_MEM(mem);
             chunk->header.size  = n_bytes;
 
             block->meta.bump    = (u8*)mem + n_bytes;
@@ -3295,22 +3313,12 @@ out:;
 
 BK_ALWAYS_INLINE
 static inline int bk_mem_is_zero(bk_Block *block, void *mem) {
-    u32 idx;
-    u32 region;
-    u32 slot;
-
     if ((u8*)mem >= (u8*)block->meta.bump_base) {
         return 1;
     } else if ((u8*)mem >= block->_slot_space) {
-        idx    = ((u8*)mem - block->_slot_space) >> block->meta.log2_size_class;
-        region = idx >> 6ULL;
-        slot   = idx  & 63ULL;
-
-        if (!GET_SLOT_TOUCHED_BIT(block->slots, region, slot)) {
-            return 1;
-        }
+        /* No guarantees for slots. */
     } else if ((u8*)mem >= block->_chunk_space) {
-        if (!(CHUNK_FROM_USER_MEM(mem)->header.flags & BK_CHUNK_BEEN_USED)) {
+        if (!(BK_CHUNK_FROM_USER_MEM(mem)->header.flags & BK_CHUNK_BEEN_USED)) {
             return 1;
         }
     }
@@ -3318,7 +3326,7 @@ static inline int bk_mem_is_zero(bk_Block *block, void *mem) {
     return 0;
 }
 
-BK_ALWAYS_INLINE HOT
+BK_ALWAYS_INLINE BK_HOT
 static inline void * bk_heap_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int zero_mem) {
     void     *mem;
     u32       size_class_idx;
@@ -3339,10 +3347,10 @@ static inline void * bk_heap_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, in
         zero_mem = 0;
         goto out;
 
-    } else if (!IS_ALIGNED(n_bytes, MIN_ALIGN)) {
-        n_bytes = ALIGN_UP(n_bytes, MIN_ALIGN);
+    } else if (!IS_ALIGNED(n_bytes, BK_MIN_ALIGN)) {
+        n_bytes = ALIGN_UP(n_bytes, BK_MIN_ALIGN);
     } else if (unlikely(n_bytes == 0)) {
-        n_bytes = MIN_ALIGN;
+        n_bytes = BK_MIN_ALIGN;
     }
 
     BK_HOOK(pre_alloc, &heap, &n_bytes, &alignment, &zero_mem);
@@ -3407,14 +3415,14 @@ out:;
     return mem;
 }
 
-BK_ALWAYS_INLINE HOT
+BK_ALWAYS_INLINE BK_HOT
 static inline void bk_heap_free(bk_Heap *heap, void *addr) {
     bk_Block *block;
     u32       fc;
 
     BK_HOOK(pre_free, heap, addr);
 
-    block = ADDR_PARENT_BLOCK(addr);
+    block = BK_ADDR_PARENT_BLOCK(addr);
 
     if (unlikely(block->meta.size_class_idx == BK_BIG_ALLOC_SIZE_CLASS_IDX)) {
         bk_big_free(heap, block, addr);
@@ -3429,7 +3437,7 @@ static inline void bk_heap_free(bk_Heap *heap, void *addr) {
         if (addr >= block->meta.bump_base) {
             FAA(&block->meta.n_bump_free, 1);
         } else if (addr < (void*)&block->slots) {
-            bk_free_chunk(heap, block, CHUNK_FROM_USER_MEM(addr));
+            bk_free_chunk(heap, block, BK_CHUNK_FROM_USER_MEM(addr));
         } else {
             bk_spin_lock(&heap->block_list_locks[block->meta.size_class_idx]);
             bk_free_slot(heap, block, addr);
@@ -3452,14 +3460,14 @@ static inline void bk_heap_free(bk_Heap *heap, void *addr) {
 }
 
 static void *bk_imalloc(u64 n_bytes) {
-    return bk_heap_alloc(bk_global_heap, n_bytes, MIN_ALIGN, 0);
+    return bk_heap_alloc(bk_global_heap, n_bytes, BK_MIN_ALIGN, 0);
 }
 
 static void  bk_ifree(void *addr)    {
     bk_Heap *heap;
 
     if (likely(addr != NULL)) {
-        heap = BLOCK_GET_HEAP_PTR(ADDR_PARENT_BLOCK(addr));
+        heap = BK_BLOCK_GET_HEAP_PTR(BK_ADDR_PARENT_BLOCK(addr));
 
         BK_ASSERT(heap != NULL, "attempting to free from block that doesn't have a heap\n");
 
@@ -3503,7 +3511,7 @@ static inline void bk_init_threads(void) {
     memset((void*)_bk_thread_datas, 0, _bk_nr_cpus * sizeof(bk_Thread_Data));
 }
 
-static THREAD_LOCAL bk_Thread_Data *_bk_local_thr;
+static BK_THREAD_LOCAL bk_Thread_Data *_bk_local_thr;
 
 BK_ALWAYS_INLINE
 static inline bk_Heap *bk_get_this_thread_heap(void) {
@@ -3582,7 +3590,7 @@ static inline void bk_init(void) {
         BK_ASSERT(test_block->_chunk_space - (u8*)test_block == sizeof(bk_Block_Metadata),
                   "_chunk_space offset incorrect");
 
-        BK_ASSERT(IS_ALIGNED(test_block->_chunk_space + sizeof(bk_Chunk), MIN_ALIGN),
+        BK_ASSERT(IS_ALIGNED(test_block->_chunk_space + sizeof(bk_Chunk), BK_MIN_ALIGN),
                   "block's first chunk is not aligned");
 
         BK_ASSERT(IS_ALIGNED(test_block->_slot_space, BK_MAX_BLOCK_ALLOC_SIZE),
@@ -3690,11 +3698,11 @@ static inline void * bk_zalloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
 }
 
 void * bk_malloc(bk_Heap *heap, size_t n_bytes) {
-    return bk_alloc(heap, n_bytes, MIN_ALIGN);
+    return bk_alloc(heap, n_bytes, BK_MIN_ALIGN);
 }
 
 void * bk_calloc(bk_Heap *heap, size_t count, size_t n_bytes) {
-    return bk_zalloc(heap, count * n_bytes, MIN_ALIGN);
+    return bk_zalloc(heap, count * n_bytes, BK_MIN_ALIGN);
 }
 
 void * bk_realloc(bk_Heap *heap, void *addr, size_t n_bytes) {
@@ -3704,7 +3712,7 @@ void * bk_realloc(bk_Heap *heap, void *addr, size_t n_bytes) {
     new_addr = NULL;
 
     if (addr == NULL) {
-        new_addr = bk_alloc(heap, n_bytes, MIN_ALIGN);
+        new_addr = bk_alloc(heap, n_bytes, BK_MIN_ALIGN);
     } else {
         if (likely(n_bytes > 0)) {
             old_size = bk_malloc_size(addr);
@@ -3712,8 +3720,8 @@ void * bk_realloc(bk_Heap *heap, void *addr, size_t n_bytes) {
              * This is done for us in bk_heap_alloc, but we'll
              * need the aligned value when we get the copy length.
              */
-            if (!IS_ALIGNED(n_bytes, MIN_ALIGN)) {
-                n_bytes = ALIGN_UP(n_bytes, MIN_ALIGN);
+            if (!IS_ALIGNED(n_bytes, BK_MIN_ALIGN)) {
+                n_bytes = ALIGN_UP(n_bytes, BK_MIN_ALIGN);
             }
 
             /*
@@ -3726,7 +3734,7 @@ void * bk_realloc(bk_Heap *heap, void *addr, size_t n_bytes) {
                 return addr;
             }
 
-            new_addr = bk_alloc(heap, n_bytes, MIN_ALIGN);
+            new_addr = bk_alloc(heap, n_bytes, BK_MIN_ALIGN);
             memcpy(new_addr, addr, old_size);
         }
 
@@ -3749,8 +3757,8 @@ void bk_free(void *addr) {
     bk_Heap  *heap;
 
     if (likely(addr != NULL)) {
-        block = ADDR_PARENT_BLOCK(addr);
-        heap  = BLOCK_GET_HEAP_PTR(block);
+        block = BK_ADDR_PARENT_BLOCK(addr);
+        heap  = BK_BLOCK_GET_HEAP_PTR(block);
 
         BK_ASSERT(heap != NULL, "attempting to free from block that doesn't have a heap\n");
 
@@ -3780,10 +3788,10 @@ size_t bk_malloc_size(void *addr) {
 
     if (unlikely(addr == NULL)) { return 0; }
 
-    block = ADDR_PARENT_BLOCK(addr);
+    block = BK_ADDR_PARENT_BLOCK(addr);
 
     if (unlikely(block->meta.size_class == BK_BIG_ALLOC_SIZE_CLASS)) {
-        chunk = CHUNK_FROM_USER_MEM(addr);
+        chunk = BK_CHUNK_FROM_USER_MEM(addr);
         BK_ASSERT(chunk->header.big_flags & BK_CHUNK_IS_BIG,
                   "non-big chunk in big chunk block");
         return chunk->header.big_size;
@@ -3791,7 +3799,7 @@ size_t bk_malloc_size(void *addr) {
         if ((u8*)addr >= block->_slot_space) {
             return block->meta.size_class;
         } else {
-            chunk = CHUNK_FROM_USER_MEM(addr);
+            chunk = BK_CHUNK_FROM_USER_MEM(addr);
             return chunk->header.size;
         }
     }
