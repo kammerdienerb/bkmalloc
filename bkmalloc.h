@@ -1949,6 +1949,7 @@ typedef struct {
     u32         main_thread_use_global;
 /* BLOCKS */
     u32         disable_block_reuse;
+    u32         trim_reuse_blocks;
 /* GARBAGE COLLECTION */
     const char *_gc_policy;
     u32         gc_policy;
@@ -2187,6 +2188,10 @@ static int bk_init_config(void) {
                                                  "Do not keep unused blocks on a list for later reuse.",
                                                  &bk_config.disable_block_reuse);
                                                  bk_opt_default_bool("disable-block-reuse", 0);
+    bk_option("trim-reuse-blocks",               BK_OPT_BOOL, BK_OPT_BLOCKS,
+                                                 "If a block is selected for reuse, but is larger than the request, decommit unneeded pages.",
+                                                 &bk_config.trim_reuse_blocks);
+                                                 bk_opt_default_bool("trim-reuse-blocks", 1);
 /* GARBAGE COLLECTION */
     bk_option("gc-policy",                       BK_OPT_STRING, BK_OPT_GARBAGE_COLLECTION,
                                                  "When and how to perform garbage collection on blocks.",
@@ -2837,6 +2842,8 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
 
         if (zero_mem && !best_fit->meta.zero) {
             bk_decommit_pages((void*)((u8*)best_fit + PAGE_SIZE), (best_fit->meta.size - PAGE_SIZE) / PAGE_SIZE);
+        } else if (bk_config.trim_reuse_blocks && best_fit->meta.size != size) {
+            bk_decommit_pages((void*)((u8*)best_fit + size), (best_fit->meta.size - size) / PAGE_SIZE);
         }
 
         if (bk_config.log_blocks) {
