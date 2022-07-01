@@ -277,7 +277,8 @@ void operator delete[](void* ptr, std::size_t size, std::align_val_t alignment) 
 char *getenv(const char *name);
 void  exit(int status);
 
-#define BK_MIN_ALIGN                            (16ULL)
+/* #define BK_MIN_ALIGN                            (16ULL) */
+#define BK_MIN_ALIGN                            (32ULL)
 #define BK_BLOCK_SIZE                           (MB(1))
 #define BK_BLOCK_ALIGN                          (MB(1))
 #define BK_BASE_SIZE_CLASS                      (BK_MIN_ALIGN)
@@ -1950,6 +1951,7 @@ typedef struct {
 /* BLOCKS */
     u32         disable_block_reuse;
     u32         trim_reuse_blocks;
+    s32         max_reuse_blocks;
 /* GARBAGE COLLECTION */
     const char *_gc_policy;
     u32         gc_policy;
@@ -2188,6 +2190,10 @@ static int bk_init_config(void) {
                                                  "Do not keep unused blocks on a list for later reuse.",
                                                  &bk_config.disable_block_reuse);
                                                  bk_opt_default_bool("disable-block-reuse", 0);
+    bk_option("max-reuse-blocks",                BK_OPT_INT, BK_OPT_BLOCKS,
+                                                 "For each heap, the block reuse list is limited to this many blocks.",
+                                                 &bk_config.max_reuse_blocks);
+                                                 bk_opt_default_int("max-reuse-blocks", 16);
     bk_option("trim-reuse-blocks",               BK_OPT_BOOL, BK_OPT_BLOCKS,
                                                  "If a block is selected for reuse, but is larger than the request, decommit unneeded pages.",
                                                  &bk_config.trim_reuse_blocks);
@@ -2205,11 +2211,11 @@ static int bk_init_config(void) {
     bk_option("gc-decommit-reuse-after-passes",  BK_OPT_INT, BK_OPT_GARBAGE_COLLECTION,
                                                  "Decommit pages of a block on a reuse list if it has gone unselected this number of times.",
                                                  &bk_config.gc_decommit_reuse_after_passes);
-                                                 bk_opt_default_int("gc-decommit-reuse-after-passes", 1000);
+                                                 bk_opt_default_int("gc-decommit-reuse-after-passes", 8);
     bk_option("gc-release-reuse-after-passes",   BK_OPT_INT, BK_OPT_GARBAGE_COLLECTION,
                                                  "Release a block on a reuse list if it has gone unselected this number of times.",
                                                  &bk_config.gc_release_reuse_after_passes);
-                                                 bk_opt_default_int("gc-release-reuse-after-passes", 1200);
+                                                 bk_opt_default_int("gc-release-reuse-after-passes", 32);
 /* HOOKS */
     bk_option("hooks-file",                      BK_OPT_STRING, BK_OPT_HOOKS,
                                                  "Path to a binary file containing hooks.",
@@ -2691,6 +2697,9 @@ static int bk_verify_reuse_list(bk_Heap *heap) {
         return 0;
     }
 
+    BK_ASSERT(count <= (u32)bk_config.max_reuse_blocks,
+              "block reuse list is too long");
+
     return 1;
 }
 #endif
@@ -2886,6 +2895,7 @@ static inline bk_Block * bk_add_block(bk_Heap *heap, u32 size_class_idx) {
 static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
     u32       idx;
     bk_Block *b;
+    bk_Block *prev;
 
     idx = block->meta.size_class_idx;
 
@@ -2922,6 +2932,27 @@ static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
         }
 
         bk_spin_lock(&heap->reuse_list_lock);
+
+        if (heap->reuse_list_len > 0
+        &&  heap->reuse_list_len == (u32)bk_config.max_reuse_blocks) {
+
+            b    = heap->reuse_list;
+            prev = NULL;
+            while (b->meta.next != NULL) {
+                prev = b;
+                b    = b->meta.next;
+            }
+
+            if (prev == NULL) {
+                heap->reuse_list = NULL;
+            } else {
+                prev->meta.next = NULL;
+            }
+
+            bk_release_block(b);
+
+            heap->reuse_list_len -= 1;
+        }
 
         block->meta.next = heap->reuse_list;
         heap->reuse_list = block;
@@ -3051,7 +3082,7 @@ static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int
     mem_start = block->_chunk_space;
     aligned   = ALIGN_UP(mem_start, alignment);
 
-    BK_ASSERT(ADDR_PARENT_BLOCK(aligned) == block,
+    BK_ASSERT(BK_ADDR_PARENT_BLOCK(aligned) == block,
               "big allocation too far from block start");
 
     BK_ASSERT((u8*)aligned + n_bytes <= (u8*)block->meta.end,
@@ -3073,7 +3104,7 @@ static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int
 }
 
 static inline void bk_big_free(bk_Heap *heap, bk_Block *block, void *addr) {
-    BK_ASSERT(CHUNK_FROM_USER_MEM(addr)->header.big_magic == BK_CHUNK_MAGIC,
+    BK_ASSERT(BK_CHUNK_FROM_USER_MEM(addr)->header.big_magic == BK_CHUNK_MAGIC,
               "big free bad magic");
 
     bk_remove_block(heap, block);
@@ -3135,7 +3166,7 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
                     chunk->header.offset_next = BK_CHUNK_DISTANCE(split, chunk);
                     chunk->header.size        = (u8*)split - (u8*)addr;
 
-                    BK_ASSERT(CHUNK_NEXT(chunk) == split,
+                    BK_ASSERT(BK_CHUNK_NEXT(chunk) == split,
                               "bad split link left");
                     BK_ASSERT((u8*)chunk + sizeof(bk_Chunk) + chunk->header.size == (u8*)split,
                               "bad split left size");
@@ -3147,15 +3178,13 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
                               "right split has no next, but doesn't span rest of chunk space");
                     BK_ASSERT(chunk->header.size >= block->meta.size_class,
                               "left split too small");
-                    BK_ASSERT(split->header.size >= block->meta.size_class,
-                              "right split too small");
 
                     chunk = split;
                 }
 
                 potential_next = ALIGN_UP((u8*)used_end, BK_MIN_ALIGN);
 
-                if ((u8*)potential_next > (u8*)end
+                if ((u8*)potential_next < (u8*)end
                 &&  (u64)((u8*)end - (u8*)potential_next) >= block->meta.size_class) {
 
                     split = BK_CHUNK_FROM_USER_MEM(potential_next);
@@ -3183,8 +3212,6 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
                               "bad split link right");
                     BK_ASSERT(next != NULL || (u8*)split + sizeof(bk_Chunk) + split->header.size == block->_chunk_space + BK_CHUNK_SPACE,
                               "right split has no next, but doesn't span rest of chunk space");
-                    BK_ASSERT(chunk->header.size >= block->meta.size_class,
-                              "left split too small");
                     BK_ASSERT(split->header.size >= block->meta.size_class,
                               "right split too small");
                 }
@@ -3199,6 +3226,7 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
                 return aligned;
             }
         }
+
         chunk = BK_CHUNK_NEXT(chunk);
     }
 
