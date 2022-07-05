@@ -665,9 +665,18 @@ typedef struct {
 #define BK_SPIN_LOCKED   (1)
 #define BK_STATIC_SPIN_LOCK_INIT ((bk_Spinlock){ BK_SPIN_UNLOCKED })
 
-BK_ALWAYS_INLINE static inline void bk_spin_init(bk_Spinlock *spin)   { spin->val = BK_SPIN_UNLOCKED;   }
-BK_ALWAYS_INLINE static inline void bk_spin_lock(bk_Spinlock *spin)   { while (!CAS(&spin->val, 0, 1)); }
-BK_ALWAYS_INLINE static inline void bk_spin_unlock(bk_Spinlock *spin) { (void)CAS(&spin->val, 1, 0);    }
+BK_ALWAYS_INLINE static inline void bk_spin_init(bk_Spinlock *spin) {
+    spin->val = BK_SPIN_UNLOCKED;
+}
+
+BK_ALWAYS_INLINE static inline void bk_spin_lock(bk_Spinlock *spin) {
+    while (!CAS(&spin->val, 0, 1));
+}
+
+BK_ALWAYS_INLINE static inline void bk_spin_unlock(bk_Spinlock *spin) {
+    BK_ASSERT(spin->val == BK_SPIN_LOCKED, "lock was not locked");
+    (void)CAS(&spin->val, 1, 0);
+}
 
 
 
@@ -1933,6 +1942,7 @@ typedef struct {
 /* LOGGING */
     const char *log_to;
     int         log_fd;
+    u32         log_config;
     u32         log_allocs;
     u32         log_frees;
     u32         log_big;
@@ -1951,7 +1961,7 @@ typedef struct {
 /* BLOCKS */
     u32         disable_block_reuse;
     u32         trim_reuse_blocks;
-    s32         max_reuse_blocks;
+    s32         max_reuse_list_size_MB;
 /* GARBAGE COLLECTION */
     const char *_gc_policy;
     u32         gc_policy;
@@ -2113,14 +2123,12 @@ lazy_comma = ", ";
 
 static int bk_init_config(void) {
     int         status;
-    int         do_log_config;
     const char *config_file;
     const char *env_opts;
     char       *words[2 * BK_MAX_OPTS];
     int         n_words;
 
     status          = 0;
-    do_log_config   = 0;
     bk_config._scfg = bk_scfg_make();
 
 /******************************* @@@options *******************************/
@@ -2130,6 +2138,10 @@ static int bk_init_config(void) {
                                                  "Path to log file.",
                                                  &bk_config.log_to);
                                                  bk_opt_default_string("log-to", "/dev/stdout");
+    bk_option("log-config",                      BK_OPT_BOOL, BK_OPT_LOGGING,
+                                                 "Print the configuration to the log file.",
+                                                 &bk_config.log_config);
+                                                 bk_opt_default_bool("log-config", 0);
     bk_option("log-allocs",                      BK_OPT_BOOL, BK_OPT_LOGGING,
                                                  "Log allocations.",
                                                  &bk_config.log_allocs);
@@ -2190,10 +2202,10 @@ static int bk_init_config(void) {
                                                  "Do not keep unused blocks on a list for later reuse.",
                                                  &bk_config.disable_block_reuse);
                                                  bk_opt_default_bool("disable-block-reuse", 0);
-    bk_option("max-reuse-blocks",                BK_OPT_INT, BK_OPT_BLOCKS,
-                                                 "For each heap, the block reuse list is limited to this many blocks.",
-                                                 &bk_config.max_reuse_blocks);
-                                                 bk_opt_default_int("max-reuse-blocks", 16);
+    bk_option("max-reuse-list-size-MB",          BK_OPT_INT, BK_OPT_BLOCKS,
+                                                 "The total allowed size (across all heaps) that can be occupied by blocks on a reuse list.",
+                                                 &bk_config.max_reuse_list_size_MB);
+                                                 bk_opt_default_int("max-reuse-list-size-MB", 4000);
     bk_option("trim-reuse-blocks",               BK_OPT_BOOL, BK_OPT_BLOCKS,
                                                  "If a block is selected for reuse, but is larger than the request, decommit unneeded pages.",
                                                  &bk_config.trim_reuse_blocks);
@@ -2211,11 +2223,11 @@ static int bk_init_config(void) {
     bk_option("gc-decommit-reuse-after-passes",  BK_OPT_INT, BK_OPT_GARBAGE_COLLECTION,
                                                  "Decommit pages of a block on a reuse list if it has gone unselected this number of times.",
                                                  &bk_config.gc_decommit_reuse_after_passes);
-                                                 bk_opt_default_int("gc-decommit-reuse-after-passes", 8);
+                                                 bk_opt_default_int("gc-decommit-reuse-after-passes", 1000);
     bk_option("gc-release-reuse-after-passes",   BK_OPT_INT, BK_OPT_GARBAGE_COLLECTION,
                                                  "Release a block on a reuse list if it has gone unselected this number of times.",
                                                  &bk_config.gc_release_reuse_after_passes);
-                                                 bk_opt_default_int("gc-release-reuse-after-passes", 32);
+                                                 bk_opt_default_int("gc-release-reuse-after-passes", 1200);
 /* HOOKS */
     bk_option("hooks-file",                      BK_OPT_STRING, BK_OPT_HOOKS,
                                                  "Path to a binary file containing hooks.",
@@ -2235,10 +2247,9 @@ static int bk_init_config(void) {
         env_opts = getenv("BKMALLOC_OPTS");
         if (env_opts != NULL) {
             n_words       = bk_sh_split(env_opts, words);
-            do_log_config = (n_words >= 1 && strcmp(words[0], "--log-config") == 0);
             status        = bk_scfg_parse_env(bk_config._scfg,
-                                              n_words - do_log_config,
-                                              (const char**)(words + do_log_config));
+                                              n_words,
+                                              (const char**)(words));
         }
     }
 
@@ -2264,7 +2275,7 @@ static int bk_init_config(void) {
         bk_config.log_hooks  = 1;
     }
 
-    if (status == 0 && do_log_config) { bk_log_config(); }
+    if (status == 0 && bk_config.log_config) { bk_log_config(); }
 
 out:;
     return status;
@@ -2521,6 +2532,7 @@ typedef struct bk_Heap {
     bk_Block    *block_lists[BK_NR_SIZE_CLASSES];
     u32          free_count;
     u32          reuse_list_len;
+    u64          reuse_list_size;
     bk_Block    *reuse_list;
     bk_Spinlock  reuse_list_lock;
     char        *user_key;
@@ -2676,6 +2688,9 @@ static inline void bk_release_block(bk_Block *block) {
     bk_release_pages(block, ((u8*)block->meta.end - (u8*)block) >> LOG2_PAGE_SIZE);
 }
 
+static u64         bk_reuse_list_bytes;
+static bk_Spinlock bk_reuse_list_bytes_lock = BK_STATIC_SPIN_LOCK_INIT;
+
 #ifdef BK_DO_ASSERTIONS
 static int bk_verify_reuse_list(bk_Heap *heap) {
     u32       count;
@@ -2697,8 +2712,8 @@ static int bk_verify_reuse_list(bk_Heap *heap) {
         return 0;
     }
 
-    BK_ASSERT(count <= (u32)bk_config.max_reuse_blocks,
-              "block reuse list is too long");
+    BK_ASSERT(bk_reuse_list_bytes <= MB(bk_config.max_reuse_list_size_MB),
+              "block reuse lists are too large");
 
     return 1;
 }
@@ -2774,6 +2789,7 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
     bk_Block *best_fit;
     bk_Block *best_fit_prev;
     bk_Block *next;
+    u64       reuse_size;
 
     bk_spin_lock(&heap->reuse_list_lock);
 
@@ -2803,7 +2819,17 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
         } else {
             best_fit_prev->meta.next = best_fit->meta.next;
         }
-        heap->reuse_list_len -= 1;
+        heap->reuse_list_len  -= 1;
+        heap->reuse_list_size -= best_fit->meta.size;
+
+        bk_spin_lock(&bk_reuse_list_bytes_lock);
+
+        BK_ASSERT(bk_reuse_list_bytes >= best_fit->meta.size, "bad bk_reuse_list_bytes");
+        bk_reuse_list_bytes -= best_fit->meta.size;
+
+        bk_spin_unlock(&bk_reuse_list_bytes_lock);
+
+        BK_ASSERT(bk_verify_reuse_list(heap), "bad reuse list");
 
         block = heap->reuse_list;
         prev  = NULL;
@@ -2820,9 +2846,19 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
                     } else {
                         prev->meta.next = next;
                     }
-                    heap->reuse_list_len -= 1;
+                    heap->reuse_list_len  -= 1;
+                    heap->reuse_list_size -= block->meta.size;
+
+                    reuse_size = block->meta.size;
 
                     bk_release_block(block);
+
+                    bk_spin_lock(&bk_reuse_list_bytes_lock);
+
+                    BK_ASSERT(bk_reuse_list_bytes >= best_fit->meta.size, "bad bk_reuse_list_bytes");
+                    bk_reuse_list_bytes -= reuse_size;
+
+                    bk_spin_unlock(&bk_reuse_list_bytes_lock);
 
                     block = prev;
                 } else if (block->meta.reuse_passes == (u32)bk_config.gc_decommit_reuse_after_passes && !block->meta.zero) {
@@ -2843,7 +2879,6 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
             block = next;
         }
 
-        BK_ASSERT(bk_verify_reuse_list(heap), "bad reuse list");
 
         bk_spin_unlock(&heap->reuse_list_lock);
 
@@ -2896,6 +2931,7 @@ static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
     u32       idx;
     bk_Block *b;
     bk_Block *prev;
+    int       on_reuse;
 
     idx = block->meta.size_class_idx;
 
@@ -2931,10 +2967,22 @@ static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
             block->meta.zero = 0;
         }
 
-        bk_spin_lock(&heap->reuse_list_lock);
 
-        if (heap->reuse_list_len > 0
-        &&  heap->reuse_list_len == (u32)bk_config.max_reuse_blocks) {
+        on_reuse = 0;
+
+        bk_spin_lock(&heap->reuse_list_lock);
+        bk_spin_lock(&bk_reuse_list_bytes_lock);
+
+        if (bk_reuse_list_bytes - heap->reuse_list_size + block->meta.size > MB(bk_config.max_reuse_list_size_MB)) {
+            /* Too big to reuse. */
+            goto out_unlock;
+        }
+
+        while (bk_reuse_list_bytes + block->meta.size > MB(bk_config.max_reuse_list_size_MB)) {
+            BK_ASSERT(heap->reuse_list != NULL,
+                      "heap says there bytes on its reuse list, but the list is empty");
+            BK_ASSERT(heap->reuse_list_size <= MB(bk_config.max_reuse_list_size_MB),
+                      "probable underflow of heap->reuse_list_size");
 
             b    = heap->reuse_list;
             prev = NULL;
@@ -2949,21 +2997,33 @@ static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
                 prev->meta.next = NULL;
             }
 
-            bk_release_block(b);
+            heap->reuse_list_len  -= 1;
+            heap->reuse_list_size -= b->meta.size;
+            bk_reuse_list_bytes   -= b->meta.size;
 
-            heap->reuse_list_len -= 1;
+            bk_release_block(b);
         }
 
         block->meta.next = heap->reuse_list;
         heap->reuse_list = block;
 
-        heap->reuse_list_len += 1;
+        heap->reuse_list_len  += 1;
+        heap->reuse_list_size += block->meta.size;
+        bk_reuse_list_bytes   += block->meta.size;
+
+        on_reuse = 1;
 
         BK_ASSERT(bk_verify_reuse_list(heap), "bad reuse list");
 
+out_unlock:;
+        bk_spin_unlock(&bk_reuse_list_bytes_lock);
         bk_spin_unlock(&heap->reuse_list_lock);
-    }
 
+        if (!on_reuse) { bk_release_block(block); }
+
+        BK_ASSERT(bk_reuse_list_bytes <= MB(bk_config.max_reuse_list_size_MB),
+                  "reuse lists too large");
+    }
 }
 
 static inline void bk_gc_block(bk_Heap *heap, bk_Block *block) {
@@ -3121,7 +3181,6 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
     void     *end;
     void     *aligned;
     void     *used_end;
-    void     *potential_next;
     bk_Chunk *next;
     bk_Chunk *split;
 
@@ -3180,40 +3239,6 @@ static inline void * bk_alloc_chunk(bk_Heap *heap, bk_Block *block, u64 n_bytes,
                               "left split too small");
 
                     chunk = split;
-                }
-
-                potential_next = ALIGN_UP((u8*)used_end, BK_MIN_ALIGN);
-
-                if ((u8*)potential_next < (u8*)end
-                &&  (u64)((u8*)end - (u8*)potential_next) >= block->meta.size_class) {
-
-                    split = BK_CHUNK_FROM_USER_MEM(potential_next);
-
-                    BK_ASSERT(split > chunk,
-                              "bad split point");
-
-                    if (next != NULL) {
-                        split->header.offset_next = BK_CHUNK_DISTANCE(next, split);
-                    } else {
-                        split->header.offset_next = 0;
-                    }
-
-                    split->header.magic       = BK_CHUNK_MAGIC;
-                    split->header.flags       = chunk->header.flags;
-                    split->header.size        = ((u8*)end - (u8*)potential_next);
-                    chunk->header.offset_next = BK_CHUNK_DISTANCE(split, chunk);
-                    chunk->header.size        = ((u8*)split - (u8*)BK_CHUNK_USER_MEM(chunk));
-
-                    BK_ASSERT((u8*)chunk + sizeof(bk_Chunk) + chunk->header.size == (u8*)split,
-                              "bad split left size");
-                    BK_ASSERT((u8*)split + sizeof(bk_Chunk) + split->header.size == (u8*)end,
-                              "bad split right size");
-                    BK_ASSERT(BK_CHUNK_NEXT(chunk) == split,
-                              "bad split link right");
-                    BK_ASSERT(next != NULL || (u8*)split + sizeof(bk_Chunk) + split->header.size == block->_chunk_space + BK_CHUNK_SPACE,
-                              "right split has no next, but doesn't span rest of chunk space");
-                    BK_ASSERT(split->header.size >= block->meta.size_class,
-                              "right split too small");
                 }
 
                 chunk->header.flags &= ~BK_CHUNK_IS_FREE;
