@@ -635,7 +635,10 @@ static inline void * bk_get_aligned_pages(u64 n_pages, u64 alignment) {
     desired_size = n_pages * PAGE_SIZE;
 
     /* Ask for memory twice the desired size so that we can get aligned memory. */
-    first_map_size = MAX(desired_size, alignment) << 1ULL;
+    first_map_size = desired_size;
+    if (alignment > PAGE_SIZE) {
+        first_map_size += ALIGN_UP(alignment, PAGE_SIZE);
+    }
 
     mem_start = bk_get_pages(first_map_size >> LOG2_PAGE_SIZE);
 
@@ -3136,7 +3139,7 @@ static inline void * bk_big_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, int
     n_bytes = ALIGN_UP(n_bytes, PAGE_SIZE) + PAGE_SIZE;
 
     /* Ask for memory twice the desired size so that we can get aligned memory. */
-    request_size = MAX(n_bytes, alignment) << 1ULL;
+    request_size = PAGE_SIZE + n_bytes + alignment;
 
     *blockp   = block = bk_get_block(heap, BK_BIG_ALLOC_SIZE_CLASS_IDX, MAX(request_size, BK_BLOCK_SIZE), zero_mem);
     mem_start = block->_chunk_space;
