@@ -1975,9 +1975,9 @@ typedef struct {
     u32         disable_hooks;
 } bk_Config;
 
-static bk_Config bk_config;
-
 #ifndef BKMALLOC_HOOK
+
+static bk_Config bk_config;
 
 enum {
     BK_OPT_BOOL,
@@ -2527,8 +2527,6 @@ enum {
     BK_HEAP_USER,
 };
 
-static u32 bk_hid_counter = 1;
-
 typedef struct bk_Heap {
     u32          flags;
     u32          hid;
@@ -2541,6 +2539,11 @@ typedef struct bk_Heap {
     bk_Spinlock  reuse_list_lock;
     char        *user_key;
 } bk_Heap;
+
+
+#ifndef BKMALLOC_HOOK
+
+static u32 bk_hid_counter = 1;
 
 static bk_Heap _bk_global_heap;
 #if 0 /* Equivalent to this initialization: */
@@ -2559,6 +2562,8 @@ static bk_Heap _bk_global_heap = {
 
 BK_GLOBAL_ALIGN(CACHE_LINE)
 static bk_Heap *bk_global_heap = &_bk_global_heap;
+
+#endif /* BKMALLOC_HOOK */
 
 
 BK_ALWAYS_INLINE
@@ -3616,10 +3621,10 @@ static inline bk_Heap *bk_get_this_thread_heap(void) {
 
 /******************************* @@init *******************************/
 
+#ifndef BKMALLOC_HOOK
+
 static s32         bk_is_initialized;
 static bk_Spinlock init_lock = BK_STATIC_SPIN_LOCK_INIT;
-
-#ifndef BKMALLOC_HOOK
 
 __attribute__((constructor))
 static inline void bk_init(void) {
