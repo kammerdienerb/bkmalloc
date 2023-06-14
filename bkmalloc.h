@@ -35,7 +35,7 @@
  * To write a hook:
  *
  *   Example myhook.c:
- *     // Compile: gcc -o myhook.so myhook.c -shared -fPIC -ldl
+ *     // Compile: gcc -o myhook.so myhook.c -shared -fPIC -ldl -lbkmalloc
  *
  *     #define BKMALLOC_HOOK
  *     #include <bkmalloc.h>
@@ -45,7 +45,7 @@
  *     }
  *
  *   Example myhook.cpp:
- *     // Compile: g++ -o myhook.so myhook.c -shared -fPIC -ldl
+ *     // Compile: g++ -o myhook.so myhook.c -shared -fPIC -ldl -lbkmalloc
  *
  *     #define BKMALLOC_HOOK
  *     #include <bkmalloc.h>
