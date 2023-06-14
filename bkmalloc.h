@@ -56,6 +56,33 @@
  *     }
  *
  *   Search "@@hooks" in this file to see the functions that you can hook into bkmalloc.
+ *
+ *   The hook utility also includes some bits on slot and chunk allocations intended to be
+ *   used by hooks for any purpose.
+ *
+ *   For slot allocations, there is a single bit available. You can use the following macros
+ *   to get/set/clear it:
+ *
+ *     BK_GET_SLOT_HOOK_BIT(slots_pointer, region_index, slot_index)
+ *     BK_SET_SLOT_HOOK_BIT(slots_pointer, region_index, slot_index)
+ *     BK_CLEAR_SLOT_HOOK_BIT(slots_pointer, region_index, slot_index)
+ *
+ *   Chunk allocations have a total of 11 bits available for hooks, which are stored in the
+ *   chunk's flag field:
+ *
+ *     BK_HOOK_FLAG_0
+ *     BK_HOOK_FLAG_1
+ *     BK_HOOK_FLAG_2
+ *     BK_HOOK_FLAG_3
+ *     BK_HOOK_FLAG_4
+ *     BK_HOOK_FLAG_5
+ *     BK_HOOK_FLAG_6
+ *     BK_HOOK_FLAG_7
+ *     BK_HOOK_FLAG_8
+ *     BK_HOOK_FLAG_9
+ *     BK_HOOK_FLAG_10
+ *
+ *   Unfortunately, allocations from the bump space do not have any bits available for hooks.
  */
 
 
