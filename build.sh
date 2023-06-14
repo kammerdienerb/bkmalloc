@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 
 ### DEBUG
-#     FP="-fno-omit-frame-pointer" # enable for profiling/debugging
-#     BK_DEBUG="-DBK_DEBUG"
-#     DEBUG="-g ${FP} -DBK_DEBUG"
+    FP="-fno-omit-frame-pointer" # enable for profiling/debugging
+    BK_DEBUG="-DBK_DEBUG"
+    DEBUG="-g ${FP} -DBK_DEBUG"
 
 ### OPT
-    LTO="-flto"
-    MARCHTUNE="-march=native -mtune=native"
-    OPT_PASSES=""
-    LEVEL="-O3"
-#     LEVEL="-O0"
+#     LTO="-flto"
+#     MARCHTUNE="-march=native -mtune=native"
+#     OPT_PASSES=""
+#     LEVEL="-O3"
+    LEVEL="-O0"
 
     OPT="${LEVEL} ${OPT_PASSES} ${MARCHTUNE} ${LTO}"
 
 ### FEATURES
     MMAP_OVERRIDE="-DBK_MMAP_OVERRIDE"
-#     RETURN_ADDR="-DBK_RETURN_ADDR" # not implemented
+    RETURN_ADDR="-DBK_RETURN_ADDR"
 #     ASSERT="-DBK_DO_ASSERTIONS"
 
     FEATURES="${MMAP_OVERRIDE} ${RETURN_ADDR} ${ASSERT}"
