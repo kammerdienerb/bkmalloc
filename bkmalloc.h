@@ -91,7 +91,10 @@
 
 #include <stddef.h> /* size_t */
 
+
 struct bk_Heap;
+
+#define BK_THREAD_LOCAL __thread
 
 
 #ifdef __cplusplus
@@ -100,6 +103,24 @@ extern "C" {
 #else
 #define BK_THROW
 #endif /* __cplusplus */
+
+#ifdef BK_RETURN_ADDR
+
+extern BK_THREAD_LOCAL void *_bk_return_addr;
+
+#define BK_STORE_RA()                                   \
+(_bk_return_addr =                                      \
+    (__builtin_frame_address(0) == 0                    \
+        ? NULL                                          \
+        : __builtin_return_address(0)))
+
+#define BK_GET_RA() (_bk_return_addr)
+
+#else
+
+#define BK_STORE_RA()
+
+#endif /* BK_RETURN_ADDR */
 
 struct bk_Heap *bk_heap(const char *name);
 void            bk_destroy_heap(const char *name);
@@ -216,10 +237,10 @@ bk_new_impl(std::size_t size) noexcept(is_no_except) {
     return bk_handle_OOM(size, is_no_except);
 }
 
-void * operator new(std::size_t size)                                    { return bk_new_impl<false>(size); }
-void * operator new[](std::size_t size)                                  { return bk_new_impl<false>(size); }
-void * operator new(std::size_t size, const std::nothrow_t &) noexcept   { return bk_new_impl<true>(size);  }
-void * operator new[](std::size_t size, const std::nothrow_t &) noexcept { return bk_new_impl<true>(size);  }
+void * operator new(std::size_t size)                                    { BK_STORE_RA(); return bk_new_impl<false>(size); }
+void * operator new[](std::size_t size)                                  { BK_STORE_RA(); return bk_new_impl<false>(size); }
+void * operator new(std::size_t size, const std::nothrow_t &) noexcept   { BK_STORE_RA(); return bk_new_impl<true>(size);  }
+void * operator new[](std::size_t size, const std::nothrow_t &) noexcept { BK_STORE_RA(); return bk_new_impl<true>(size);  }
 
 #if __cpp_aligned_new >= 201606
 
@@ -237,10 +258,10 @@ bk_aligned_new_impl(std::size_t size, std::align_val_t alignment) noexcept(is_no
     return bk_handle_OOM(size, is_no_except);
 }
 
-void * operator new(std::size_t size, std::align_val_t alignment)                                    { return bk_aligned_new_impl<false>(size, alignment); }
-void * operator new[](std::size_t size, std::align_val_t alignment)                                  { return bk_aligned_new_impl<false>(size, alignment); }
-void * operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t &) noexcept   { return bk_aligned_new_impl<true>(size, alignment);  }
-void * operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t &) noexcept { return bk_aligned_new_impl<true>(size, alignment);  }
+void * operator new(std::size_t size, std::align_val_t alignment)                                    { BK_STORE_RA(); return bk_aligned_new_impl<false>(size, alignment); }
+void * operator new[](std::size_t size, std::align_val_t alignment)                                  { BK_STORE_RA(); return bk_aligned_new_impl<false>(size, alignment); }
+void * operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t &) noexcept   { BK_STORE_RA(); return bk_aligned_new_impl<true>(size, alignment);  }
+void * operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t &) noexcept { BK_STORE_RA(); return bk_aligned_new_impl<true>(size, alignment);  }
 
 #endif  /* __cpp_aligned_new */
 
@@ -352,7 +373,6 @@ static inline void bk_init(void);
 #define BK_GLOBAL_ALIGN(_a) __attribute__((aligned((_a))))
 #define BK_FIELD_ALIGN(_a)  __attribute__((aligned((_a))))
 #define BK_PACKED           __attribute__((packed))
-#define BK_THREAD_LOCAL     __thread
 
 #define XOR_SWAP_64(a, b) do {   \
     a = ((u64)(a)) ^ ((u64)(b)); \
@@ -3547,6 +3567,8 @@ static bk_Thread_Data *_bk_thread_datas;
 static u32             _bk_main_thread_cpu;
 static u32             _bk_nr_cpus;
 
+
+
 static inline void bk_init_threads(void) {
     _bk_main_thread_cpu = bk_getcpu();
     _bk_nr_cpus         = bk_get_nr_cpus();
@@ -3740,15 +3762,18 @@ static inline void * bk_zalloc(bk_Heap *heap, u64 n_bytes, u64 alignment) {
     return _bk_alloc(heap, n_bytes, alignment, 1);
 }
 
-void * bk_malloc(bk_Heap *heap, size_t n_bytes) {
+BK_ALWAYS_INLINE
+static inline void * _bk_malloc(bk_Heap *heap, size_t n_bytes) {
     return bk_alloc(heap, n_bytes, BK_MIN_ALIGN);
 }
 
-void * bk_calloc(bk_Heap *heap, size_t count, size_t n_bytes) {
+BK_ALWAYS_INLINE
+static inline void * _bk_calloc(bk_Heap *heap, size_t count, size_t n_bytes) {
     return bk_zalloc(heap, count * n_bytes, BK_MIN_ALIGN);
 }
 
-void * bk_realloc(bk_Heap *heap, void *addr, size_t n_bytes) {
+BK_ALWAYS_INLINE
+static inline void * _bk_realloc(bk_Heap *heap, void *addr, size_t n_bytes) {
     void *new_addr;
     u64   old_size;
 
@@ -3787,15 +3812,18 @@ void * bk_realloc(bk_Heap *heap, void *addr, size_t n_bytes) {
     return new_addr;
 }
 
-void * bk_reallocf(bk_Heap *heap, void *addr, size_t n_bytes) {
-    return bk_realloc(heap, addr, n_bytes);
+BK_ALWAYS_INLINE
+static inline void * _bk_reallocf(bk_Heap *heap, void *addr, size_t n_bytes) {
+    return _bk_realloc(heap, addr, n_bytes);
 }
 
-void * bk_valloc(bk_Heap *heap, size_t n_bytes) {
+BK_ALWAYS_INLINE
+static inline void * _bk_valloc(bk_Heap *heap, size_t n_bytes) {
     return bk_alloc(heap, n_bytes, PAGE_SIZE);
 }
 
-void bk_free(void *addr) {
+BK_ALWAYS_INLINE
+static inline void _bk_free(void *addr) {
     bk_Block *block;
     bk_Heap  *heap;
 
@@ -3809,7 +3837,8 @@ void bk_free(void *addr) {
     }
 }
 
-int bk_posix_memalign(bk_Heap *heap, void **memptr, size_t alignment, size_t n_bytes) {
+BK_ALWAYS_INLINE
+static inline int _bk_posix_memalign(bk_Heap *heap, void **memptr, size_t alignment, size_t n_bytes) {
     if (unlikely(!IS_POWER_OF_TWO(alignment)
     ||  alignment < sizeof(void*))) {
         return EINVAL;
@@ -3821,11 +3850,13 @@ int bk_posix_memalign(bk_Heap *heap, void **memptr, size_t alignment, size_t n_b
     return 0;
 }
 
-void * bk_aligned_alloc(bk_Heap *heap, size_t alignment, size_t size) {
+BK_ALWAYS_INLINE
+static inline void * _bk_aligned_alloc(bk_Heap *heap, size_t alignment, size_t size) {
     return bk_alloc(heap, size, alignment);
 }
 
-size_t bk_malloc_size(void *addr) {
+BK_ALWAYS_INLINE
+static inline size_t _bk_malloc_size(void *addr) {
     bk_Block *block;
     bk_Chunk *chunk;
 
@@ -3850,23 +3881,37 @@ size_t bk_malloc_size(void *addr) {
     return 0;
 }
 
-void * malloc(size_t n_bytes) BK_THROW                                       { return bk_malloc(BK_GET_HEAP(), n_bytes);                         }
-void * calloc(size_t count, size_t n_bytes) BK_THROW                         { return bk_calloc(BK_GET_HEAP(), count, n_bytes);                  }
-void * realloc(void *addr, size_t n_bytes) BK_THROW                          { return bk_realloc(BK_GET_HEAP(), addr, n_bytes);                  }
-void * reallocf(void *addr, size_t n_bytes) BK_THROW                         { return bk_reallocf(BK_GET_HEAP(), addr, n_bytes);                 }
-void * valloc(size_t n_bytes) BK_THROW                                       { return bk_valloc(BK_GET_HEAP(), n_bytes);                         }
-void * pvalloc(size_t n_bytes) BK_THROW                                      { return NULL;                                                      }
-void   free(void *addr) BK_THROW                                             { bk_free(addr);                                                    }
-int    posix_memalign(void **memptr, size_t alignment, size_t size) BK_THROW { return bk_posix_memalign(BK_GET_HEAP(), memptr, alignment, size); }
-void * aligned_alloc(size_t alignment, size_t size) BK_THROW                 { return bk_aligned_alloc(BK_GET_HEAP(), alignment, size);          }
-void * memalign(size_t alignment, size_t size) BK_THROW                      { return bk_aligned_alloc(BK_GET_HEAP(), alignment, size);;         }
-size_t malloc_size(void *addr) BK_THROW                                      { return bk_malloc_size(addr);                                      }
-size_t malloc_usable_size(void *addr) BK_THROW                               { return 0;                                                         }
+BK_THREAD_LOCAL void *_bk_return_addr;
+
+void * bk_malloc(struct bk_Heap *heap, size_t n_bytes)                                          { BK_STORE_RA(); return _bk_malloc(heap, n_bytes);                            }
+void * bk_calloc(struct bk_Heap *heap, size_t count, size_t n_bytes)                            { BK_STORE_RA(); return _bk_malloc(heap, n_bytes);                            }
+void * bk_realloc(struct bk_Heap *heap, void *addr, size_t n_bytes)                             { BK_STORE_RA(); return _bk_realloc(heap, addr, n_bytes);                     }
+void * bk_reallocf(struct bk_Heap *heap, void *addr, size_t n_bytes)                            { BK_STORE_RA(); return _bk_reallocf(heap, addr, n_bytes);                    }
+void * bk_valloc(struct bk_Heap *heap, size_t n_bytes)                                          { BK_STORE_RA(); return _bk_valloc(heap, n_bytes);                            }
+void   bk_free(void *addr)                                                                      { return _bk_free(addr);                                                      }
+int    bk_posix_memalign(struct bk_Heap *heap, void **memptr, size_t alignment, size_t n_bytes) { BK_STORE_RA(); return _bk_posix_memalign(heap, memptr, alignment, n_bytes); }
+void * bk_aligned_alloc(struct bk_Heap *heap, size_t alignment, size_t size)                    { BK_STORE_RA(); return _bk_aligned_alloc(heap, alignment, size);             }
+size_t bk_malloc_size(void *addr)                                                               { return _bk_malloc_size(addr);                                               }
+
+void * malloc(size_t n_bytes) BK_THROW                                       { BK_STORE_RA(); return bk_malloc(BK_GET_HEAP(), n_bytes);                         }
+void * calloc(size_t count, size_t n_bytes) BK_THROW                         { BK_STORE_RA(); return bk_calloc(BK_GET_HEAP(), count, n_bytes);                  }
+void * realloc(void *addr, size_t n_bytes) BK_THROW                          { BK_STORE_RA(); return bk_realloc(BK_GET_HEAP(), addr, n_bytes);                  }
+void * reallocf(void *addr, size_t n_bytes) BK_THROW                         { BK_STORE_RA(); return bk_reallocf(BK_GET_HEAP(), addr, n_bytes);                 }
+void * valloc(size_t n_bytes) BK_THROW                                       { BK_STORE_RA(); return bk_valloc(BK_GET_HEAP(), n_bytes);                         }
+void * pvalloc(size_t n_bytes) BK_THROW                                      { return NULL;                                                                     }
+void   free(void *addr) BK_THROW                                             { bk_free(addr);                                                                   }
+int    posix_memalign(void **memptr, size_t alignment, size_t size) BK_THROW { BK_STORE_RA(); return bk_posix_memalign(BK_GET_HEAP(), memptr, alignment, size); }
+void * aligned_alloc(size_t alignment, size_t size) BK_THROW                 { BK_STORE_RA(); return bk_aligned_alloc(BK_GET_HEAP(), alignment, size);          }
+void * memalign(size_t alignment, size_t size) BK_THROW                      { BK_STORE_RA(); return bk_aligned_alloc(BK_GET_HEAP(), alignment, size);;         }
+size_t malloc_size(void *addr) BK_THROW                                      { return bk_malloc_size(addr);                                                     }
+size_t malloc_usable_size(void *addr) BK_THROW                               { return 0;                                                                        }
 
 #ifdef BK_MMAP_OVERRIDE
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
     long  ret;
     void *ret_addr;
+
+    BK_STORE_RA();
 
     ret      = syscall(SYS_mmap, addr, length, prot, flags, fd, offset);
     ret_addr = (void*)ret;
