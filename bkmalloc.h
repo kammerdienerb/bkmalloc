@@ -40,7 +40,7 @@
  *     #define BKMALLOC_HOOK
  *     #include <bkmalloc.h>
  *
- *     void pre_alloc(struct bk_Heap **heapp, u64 *n_bytesp, u64 *alignmentp, int *zero_memp) {
+ *     void bk_pre_alloc_hook(struct bk_Heap **heapp, u64 *n_bytesp, u64 *alignmentp, int *zero_memp) {
  *         // Do things before allocation.
  *     }
  *
@@ -51,11 +51,12 @@
  *     #include <bkmalloc.h>
  *
  *     extern "C"
- *     void block_new(struct bk_Heap *heap, union bk_Block *block) {
+ *     void bk_block_new_hook(struct bk_Heap *heap, union bk_Block *block) {
  *         // Do things after a new block has been created.
  *     }
  *
  *   Search "@@hooks" in this file to see the functions that you can hook into bkmalloc.
+ *   They should all be prefixed with "bk_" and suffixed with "_hook".
  *
  *   The hook utility also includes some bits on slot and chunk allocations intended to be
  *   used by hooks for any purpose.
