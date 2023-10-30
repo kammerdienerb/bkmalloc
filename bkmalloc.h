@@ -511,17 +511,25 @@ static inline void *bk_library_symbol_unix(void *lib_handle, const char *name) {
 #endif
 
 #if defined(BK_UNIX)
+
+static BK_THREAD_LOCAL int _bk_internal_mmap;
+static BK_THREAD_LOCAL int _bk_internal_munmap;
+
 static inline void * bk_get_pages_unix(u64 n_pages) {
     u64   desired_size;
     void *pages;
 
     desired_size = n_pages * PAGE_SIZE;
 
+    _bk_internal_mmap = 1;
+
     errno = 0;
     pages = mmap(NULL, desired_size,
                  PROT_READ   | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS,
                  -1, (off_t)0);
+
+    _bk_internal_mmap = 0;
 
     if (unlikely(pages == MAP_FAILED || pages == NULL)) {
         BK_ASSERT(0,
@@ -540,7 +548,10 @@ static inline void bk_release_pages_unix(void *addr, u64 n_pages) {
 
     (void)err;
 
+    _bk_internal_munmap = 1;
     err = munmap(addr, n_pages * PAGE_SIZE);
+    _bk_internal_munmap = 0;
+
     BK_ASSERT(err == 0,
               "munmap() failed");
 }
@@ -3891,7 +3902,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
     ret      = syscall(SYS_mmap, addr, length, prot, flags, fd, offset);
     ret_addr = (void*)ret;
 
-    if (ret_addr != MAP_FAILED) {
+    if (!_bk_internal_mmap && ret_addr != MAP_FAILED) {
         BK_HOOK(post_mmap, addr, length, prot, flags, fd, offset, ret_addr);
     }
 
@@ -3903,7 +3914,7 @@ int munmap(void *addr, size_t length) {
 
     ret = syscall(SYS_munmap, addr, length);
 
-    if (ret == 0) {
+    if (!_bk_internal_munmap && ret == 0) {
         BK_HOOK(post_munmap, addr, length);
     }
 
