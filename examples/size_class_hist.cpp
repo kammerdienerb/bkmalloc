@@ -12,7 +12,7 @@ struct Hooks {
         bk_Block *block;
         u32       idx;
 
-        block = ADDR_PARENT_BLOCK(addr);
+        block = BK_ADDR_PARENT_BLOCK(addr);
         idx   = block->meta.size_class_idx;
 
         if (idx == BK_BIG_ALLOC_SIZE_CLASS_IDX) { idx = BK_NR_SIZE_CLASSES; }
