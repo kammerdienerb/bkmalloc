@@ -109,11 +109,11 @@ extern "C" {
 
 extern BK_THREAD_LOCAL void *_bk_return_addr;
 
-#define BK_STORE_RA()                                   \
-(_bk_return_addr =                                      \
-    (__builtin_frame_address(0) == 0                    \
-        ? NULL                                          \
-        : __builtin_return_address(0)))
+#define BK_STORE_RA()                                                  \
+(_bk_return_addr =                                                     \
+    (__builtin_frame_address(0) == 0                                   \
+        ? NULL                                                         \
+        : __builtin_extract_return_addr(__builtin_return_address(0))))
 
 #define BK_GET_RA() (_bk_return_addr)
 
@@ -140,6 +140,8 @@ void   bk_free(void *addr);
 int    bk_posix_memalign(struct bk_Heap *heap, void **memptr, size_t alignment, size_t n_bytes);
 void * bk_aligned_alloc(struct bk_Heap *heap, size_t alignment, size_t size);
 size_t bk_malloc_size(void *addr);
+
+void * _bk_new(size_t n_bytes) BK_THROW;
 
 void * malloc(size_t n_bytes) BK_THROW;
 void * calloc(size_t count, size_t n_bytes) BK_THROW;
@@ -220,7 +222,7 @@ bk_handle_OOM(std::size_t size, bool nothrow) {
             break;
         }
 
-        ptr = malloc(size);
+        ptr = _bk_new(size);
     }
 
     if (ptr == nullptr && !nothrow) { std::__throw_bad_alloc(); }
@@ -233,7 +235,7 @@ static inline void *
 bk_new_impl(std::size_t size) noexcept(is_no_except) {
     void *ptr;
 
-    ptr = malloc(size);
+    ptr = _bk_new(size);
     if (__builtin_expect(ptr != nullptr, 1)) { return ptr; }
 
     return bk_handle_OOM(size, is_no_except);
@@ -3912,6 +3914,9 @@ int    bk_posix_memalign(struct bk_Heap *heap, void **memptr, size_t alignment, 
 void * bk_aligned_alloc(struct bk_Heap *heap, size_t alignment, size_t size)                    { BK_STORE_RA(); return _bk_aligned_alloc(heap, alignment, size);                   }
 size_t bk_malloc_size(void *addr)                                                               { return _bk_malloc_size(addr);                                                     }
 
+/* This helper does not BK_STORE_RA() since that is done higher up in the new wrappers. */
+void * _bk_new(size_t n_bytes) BK_THROW                                                         { return _bk_malloc(BK_GET_HEAP(), n_bytes);                                        }
+
 void * malloc(size_t n_bytes) BK_THROW                                                          { BK_STORE_RA(); return _bk_malloc(BK_GET_HEAP(), n_bytes);                         }
 void * calloc(size_t count, size_t n_bytes) BK_THROW                                            { BK_STORE_RA(); return _bk_calloc(BK_GET_HEAP(), count, n_bytes);                  }
 void * realloc(void *addr, size_t n_bytes) BK_THROW                                             { BK_STORE_RA(); return _bk_realloc(BK_GET_HEAP(), addr, n_bytes);                  }
@@ -3921,7 +3926,7 @@ void * pvalloc(size_t n_bytes) BK_THROW                                         
 void   free(void *addr) BK_THROW                                                                { _bk_free(addr);                                                                   }
 int    posix_memalign(void **memptr, size_t alignment, size_t size) BK_THROW                    { BK_STORE_RA(); return _bk_posix_memalign(BK_GET_HEAP(), memptr, alignment, size); }
 void * aligned_alloc(size_t alignment, size_t size) BK_THROW                                    { BK_STORE_RA(); return _bk_aligned_alloc(BK_GET_HEAP(), alignment, size);          }
-void * memalign(size_t alignment, size_t size) BK_THROW                                         { BK_STORE_RA(); return _bk_aligned_alloc(BK_GET_HEAP(), alignment, size);;         }
+void * memalign(size_t alignment, size_t size) BK_THROW                                         { BK_STORE_RA(); return _bk_aligned_alloc(BK_GET_HEAP(), alignment, size);          }
 size_t malloc_size(void *addr) BK_THROW                                                         { return _bk_malloc_size(addr);                                                     }
 size_t malloc_usable_size(void *addr) BK_THROW                                                  { return 0;                                                                         }
 
@@ -3930,7 +3935,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
     long  ret;
     void *ret_addr;
 
-    BK_STORE_RA();
+    if (!_bk_internal_mmap) { BK_STORE_RA(); }
 
     ret      = syscall(SYS_mmap, addr, length, prot, flags, fd, offset);
     ret_addr = (void*)ret;
