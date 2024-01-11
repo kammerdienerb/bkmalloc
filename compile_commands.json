@@ -1,0 +1,34 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/x86_64-linux-gnu-g++-10",
+      "-c",
+      "-o",
+      "libbkmalloc.so",
+      "-x",
+      "c++",
+      "bkmalloc.h",
+      "-DBKMALLOC_IMPL",
+      "-fno-rtti",
+      "-fPIC",
+      "-ftls-model=initial-exec",
+      "-O3",
+      "-march=native",
+      "-mtune=native",
+      "-flto",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-Wno-missing-field-initializers",
+      "-Wno-unused-parameter",
+      "-Wno-unused-function",
+      "-Wno-unused-value",
+      "-fmax-errors=3",
+      "-DBK_MMAP_OVERRIDE",
+      "-DBK_RETURN_ADDR"
+    ],
+    "directory": "/home/bkammerd/projects/memory-ef/env/src/bkmalloc",
+    "file": "/home/bkammerd/projects/memory-ef/env/src/bkmalloc/bkmalloc.h",
+    "output": "/home/bkammerd/projects/memory-ef/env/src/bkmalloc/bkmalloc.o"
+  }
+]

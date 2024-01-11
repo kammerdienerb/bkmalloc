@@ -484,8 +484,9 @@ static inline u64 bk_str_hash(bk_str s) {
     unsigned long hash = 5381;
     int c;
 
-    while ((c = *s++))
-    hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    while ((c = *s++)) {
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
 
     return hash;
 }
