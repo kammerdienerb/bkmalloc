@@ -425,6 +425,7 @@ static inline int bk_is_space(int c) {
 }
 
 static void bk_fdprintf(int fd, const char *fmt, ...);
+static void bk_sprintf(char *buff, const char *fmt, ...);
 
 #define bk_printf(...) (bk_fdprintf(1, __VA_ARGS__))
 #define bk_logf(...)                                 \
@@ -907,7 +908,7 @@ static const char * bk_eat_pad(const char *s, int *pad, va_list *argsp) {
 
 static bk_Spinlock bk_printf_lock;
 
-void bk_vprintf(int fd, const char *fmt, va_list _args) {
+void bk_vprintf(char *out_buff, int fd, const char *fmt, va_list _args) {
     va_list     args;
     int         last_was_perc;
     char        c;
@@ -916,12 +917,15 @@ void bk_vprintf(int fd, const char *fmt, va_list _args) {
     char        buff[64];
     const char *p;
     int         p_len;
+    int         len;
 
     bk_spin_lock(&bk_printf_lock);
 
     va_copy(args, _args);
 
     last_was_perc = 0;
+
+    if (out_buff != NULL) { out_buff[0] = 0; }
 
     while ((c = *fmt)) {
         if (c == '%' && !last_was_perc) {
@@ -971,14 +975,24 @@ void bk_vprintf(int fd, const char *fmt, va_list _args) {
 
             for (; pad - p_len > 0; pad -= 1) { BK_PUTC(fd, padz ? '0' : ' '); }
 
-            bk_puts(fd, p);
+            if (out_buff != NULL) {
+                strcat(out_buff, p);
+            } else {
+                bk_puts(fd, p);
+            }
 
             for (; pad + p_len < 0; pad += 1) { BK_PUTC(fd, padz ? '0' : ' '); }
 
 noprint:;
             last_was_perc = 0;
         } else {
-            BK_PUTC(fd, *fmt);
+            if (out_buff != NULL) {
+                len               = strlen(out_buff);
+                out_buff[len]     = *fmt;
+                out_buff[len + 1] = 0;
+            } else {
+                BK_PUTC(fd, *fmt);
+            }
         }
 
 next:;
@@ -994,7 +1008,15 @@ static void bk_fdprintf(int fd, const char *fmt, ...) {
     va_list args;
 
     va_start(args, fmt);
-    bk_vprintf(fd, fmt, args);
+    bk_vprintf(NULL, fd, fmt, args);
+    va_end(args);
+}
+
+static void bk_sprintf(char *buff, const char *fmt, ...) {
+    va_list args;
+
+    va_start(args, fmt);
+    bk_vprintf(buff, -1, fmt, args);
     va_end(args);
 }
 
