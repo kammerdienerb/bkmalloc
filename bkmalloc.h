@@ -2331,6 +2331,7 @@ union bk_Block;
 
 typedef struct {
     void *handle;
+    void (*pre_block_new)(struct bk_Heap**, union bk_Block**);     /* ARGS: heap inout, block inout                                              */
     void (*block_new)(struct bk_Heap*, union bk_Block*);           /* ARGS: heap in, block in                                                    */
     void (*block_release)(struct bk_Heap*, union bk_Block*);       /* ARGS: heap in, block in                                                    */
     void (*pre_alloc)(struct bk_Heap**, u64*, u64*, int*);         /* ARGS: heap inout, n_bytes inout, alignment inout, zero_mem inout           */
@@ -2389,6 +2390,7 @@ do {                                                                            
     }                                                                                                    \
 } while (0)
 
+    INSTALL_HOOK(pre_block_new);
     INSTALL_HOOK(block_new);
     INSTALL_HOOK(block_release);
     INSTALL_HOOK(pre_alloc);
@@ -2702,7 +2704,13 @@ static inline bk_Block * bk_make_block(bk_Heap *heap, u32 size_class_idx, u64 si
 
     if (!IS_ALIGNED(size, PAGE_SIZE)) { size = ALIGN_UP(size, PAGE_SIZE); }
 
-    block = (bk_Block*)bk_get_aligned_pages(size >> LOG2_PAGE_SIZE, BK_BLOCK_ALIGN);
+    /* See if a hook wants to provide us with pages for this block. */
+    block = NULL;
+    BK_HOOK(pre_block_new, &heap, &block);
+
+    if (block == NULL) {
+        block = (bk_Block*)bk_get_aligned_pages(size >> LOG2_PAGE_SIZE, BK_BLOCK_ALIGN);
+    }
 
     bk_reset_block(block, heap, size_class_idx, size, 1);
 
