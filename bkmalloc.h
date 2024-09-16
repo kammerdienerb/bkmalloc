@@ -2710,6 +2710,9 @@ static inline bk_Block * bk_make_block(bk_Heap *heap, u32 size_class_idx, u64 si
 
     if (block == NULL) {
         block = (bk_Block*)bk_get_aligned_pages(size >> LOG2_PAGE_SIZE, BK_BLOCK_ALIGN);
+    } else {
+        BK_ASSERT(block != NULL, "block memory from hook is NULL");
+        BK_ASSERT(IS_ALIGNED((void*)block, BK_BLOCK_ALIGN), "block memory from hook is not aligned by BK_BLOCK_ALIGN");
     }
 
     bk_reset_block(block, heap, size_class_idx, size, 1);
