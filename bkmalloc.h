@@ -2331,15 +2331,15 @@ union bk_Block;
 
 typedef struct {
     void *handle;
-    void (*pre_block_new)(struct bk_Heap**, union bk_Block**);     /* ARGS: heap inout, block inout                                              */
-    void (*block_new)(struct bk_Heap*, union bk_Block*);           /* ARGS: heap in, block in                                                    */
-    void (*block_release)(struct bk_Heap*, union bk_Block*);       /* ARGS: heap in, block in                                                    */
-    void (*pre_alloc)(struct bk_Heap**, u64*, u64*, int*);         /* ARGS: heap inout, n_bytes inout, alignment inout, zero_mem inout           */
-    void (*post_alloc)(struct bk_Heap*, u64, u64, int, void*);     /* ARGS: heap in, n_bytes in, alignment in, zero_mem in, address in           */
-    void (*pre_free)(struct bk_Heap*, void*);                      /* ARGS: heap in, address in                                                  */
+    void (*pre_block_new)(struct bk_Heap**, u32 size_class_idx, u64 size, union bk_Block**); /* ARGS: heap inout, size_class_idx in, size in, block inout                  */
+    void (*block_new)(struct bk_Heap*, union bk_Block*);                                     /* ARGS: heap in, block in                                                    */
+    void (*block_release)(struct bk_Heap*, union bk_Block*);                                 /* ARGS: heap in, block in                                                    */
+    void (*pre_alloc)(struct bk_Heap**, u64*, u64*, int*);                                   /* ARGS: heap inout, n_bytes inout, alignment inout, zero_mem inout           */
+    void (*post_alloc)(struct bk_Heap*, u64, u64, int, void*);                               /* ARGS: heap in, n_bytes in, alignment in, zero_mem in, address in           */
+    void (*pre_free)(struct bk_Heap*, void*);                                                /* ARGS: heap in, address in                                                  */
 #ifdef BK_MMAP_OVERRIDE
-    void (*post_mmap)(void*, size_t, int, int, int, off_t, void*); /* ARGS: addr in, length in, prot in, flags in, fd in, offset in, ret_addr in */
-    void (*post_munmap)(void*, size_t);                            /* ARGS: addr in, length in                                                   */
+    void (*post_mmap)(void*, size_t, int, int, int, off_t, void*);                           /* ARGS: addr in, length in, prot in, flags in, fd in, offset in, ret_addr in */
+    void (*post_munmap)(void*, size_t);                                                      /* ARGS: addr in, length in                                                   */
 #endif
     int  unhooked;
 } bk_Hooks;
@@ -2706,7 +2706,7 @@ static inline bk_Block * bk_make_block(bk_Heap *heap, u32 size_class_idx, u64 si
 
     /* See if a hook wants to provide us with pages for this block. */
     block = NULL;
-    BK_HOOK(pre_block_new, &heap, &block);
+    BK_HOOK(pre_block_new, &heap, size_class_idx, size, &block);
 
     if (block == NULL) {
         block = (bk_Block*)bk_get_aligned_pages(size >> LOG2_PAGE_SIZE, BK_BLOCK_ALIGN);
