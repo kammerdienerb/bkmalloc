@@ -558,6 +558,10 @@ static inline void *bk_open_library_unix(const char *path) {
     return dlopen(path, RTLD_NOW);
 }
 
+static inline void bk_close_library_unix(void *lib_handle) {
+    dlclose(lib_handle);
+}
+
 static inline void *bk_library_symbol_unix(void *lib_handle, const char *name) {
     return dlsym(lib_handle, name);
 }
@@ -624,6 +628,7 @@ static inline void bk_decommit_pages_unix(void *addr, u64 n_pages) {
 #error "Windows is not supported yet."
 
 static inline void * bk_open_library_win(const char *path)                     { return NULL; }
+static inline void   bk_close_library_win(void *lib_handle)                    { return NULL; }
 static inline void * bk_library_symbol_win(void *lib_handle, const char *name) { return NULL; }
 static inline void * bk_get_pages_win(u64 n_pages)                             { return NULL; }
 static inline void   bk_release_pages_win(void *addr, u64 n_pages)             {              }
@@ -637,6 +642,14 @@ static inline void   bk_decommit_pages_win(void *addr, u64 n_pages)            {
 static inline void * bk_open_library(const char *path) {
 #if defined(BK_UNIX)
     return bk_open_library_unix(path);
+#else
+    #error "platform missing implementation"
+#endif
+}
+
+static inline void bk_close_library(void *lib_handle) {
+#if defined(BK_UNIX)
+    return bk_close_library_unix(lib_handle);
 #else
     #error "platform missing implementation"
 #endif
@@ -2345,7 +2358,7 @@ typedef struct {
 } bk_Hooks;
 
 static bk_Hooks bk_hooks;
-static THREAD _bk_in_hook;
+static BK_THREAD_LOCAL int _bk_in_hook;
 
 #define BK_HOOK(_name, ...)                          \
 do {                                                 \
@@ -3751,6 +3764,10 @@ extern "C" {
 #endif /* __cplusplus */
 
 void bk_unhook(void) {
+    if (bk_hooks.handle != NULL) {
+        bk_close_library(bk_hooks.handle);
+    }
+
     bk_memzero(&bk_hooks, sizeof(bk_hooks));
     bk_hooks.unhooked = 1;
 
