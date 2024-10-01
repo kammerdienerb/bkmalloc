@@ -2345,12 +2345,15 @@ typedef struct {
 } bk_Hooks;
 
 static bk_Hooks bk_hooks;
+static THREAD _bk_in_hook;
 
-#define BK_HOOK(_name, ...)          \
-do {                                 \
-    if (bk_hooks._name != NULL) {    \
-        bk_hooks._name(__VA_ARGS__); \
-    }                                \
+#define BK_HOOK(_name, ...)                          \
+do {                                                 \
+    if (!_bk_in_hook && bk_hooks._name != NULL) {    \
+        _bk_in_hook = 1;                             \
+        bk_hooks._name(__VA_ARGS__);                 \
+        _bk_in_hook = 0;                             \
+    }                                                \
 } while (0)
 
 static void bk_init_hooks(void) {
@@ -2585,6 +2588,7 @@ typedef struct bk_Heap {
 static u32 bk_hid_counter = 1;
 
 static bk_Heap _bk_global_heap;
+static bk_Heap _bk_hooks_heap;
 #if 0 /* Equivalent to this initialization: */
 
 static bk_Heap _bk_global_heap = {
@@ -2601,6 +2605,8 @@ static bk_Heap _bk_global_heap = {
 
 BK_GLOBAL_ALIGN(CACHE_LINE)
 static bk_Heap *bk_global_heap = &_bk_global_heap;
+BK_GLOBAL_ALIGN(CACHE_LINE)
+static bk_Heap *bk_hooks_heap = &_bk_hooks_heap;
 
 #endif /* BKMALLOC_HOOK */
 
@@ -3454,6 +3460,10 @@ static inline void * bk_heap_alloc(bk_Heap *heap, u64 n_bytes, u64 alignment, in
     BK_ASSERT(IS_POWER_OF_TWO(alignment), "alignment not a power of two");
 
     mem = NULL;
+
+    if (unlikely(_bk_in_hook)) {
+        heap = bk_hooks_heap;
+    }
 
     if (BK_REQUEST_NEEDS_BIG_ALLOC(n_bytes, alignment, zero_mem)) {
 
