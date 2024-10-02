@@ -4008,13 +4008,14 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
         /* Let a pre_mmap hook provide their own result. They might have simply changed
          * the arguments. In that case proceed as we would normally. */
         if (ret_addr != NULL) {
-            return ret_addr;
+            goto post;
         }
     }
 
     ret      = syscall(SYS_mmap, addr, length, prot, flags, fd, offset);
     ret_addr = (void*)ret;
 
+post:;
     if (!_bk_internal_mmap && ret_addr != MAP_FAILED) {
         BK_HOOK(post_mmap, addr, length, prot, flags, fd, offset, ret_addr);
     }
