@@ -2344,15 +2344,16 @@ union bk_Block;
 
 typedef struct {
     void *handle;
-    void (*pre_block_new)(struct bk_Heap**, u32 size_class_idx, u64 size, union bk_Block**); /* ARGS: heap inout, size_class_idx in, size in, block inout                  */
-    void (*block_new)(struct bk_Heap*, union bk_Block*);                                     /* ARGS: heap in, block in                                                    */
-    void (*block_release)(struct bk_Heap*, union bk_Block*);                                 /* ARGS: heap in, block in                                                    */
-    void (*pre_alloc)(struct bk_Heap**, u64*, u64*, int*);                                   /* ARGS: heap inout, n_bytes inout, alignment inout, zero_mem inout           */
-    void (*post_alloc)(struct bk_Heap*, u64, u64, int, void*);                               /* ARGS: heap in, n_bytes in, alignment in, zero_mem in, address in           */
-    void (*pre_free)(struct bk_Heap*, void*);                                                /* ARGS: heap in, address in                                                  */
+    void (*pre_block_new)(struct bk_Heap**, u32 size_class_idx, u64 size, union bk_Block**); /* ARGS: heap inout, size_class_idx in, size in, block inout                                     */
+    void (*block_new)(struct bk_Heap*, union bk_Block*);                                     /* ARGS: heap in, block in                                                                       */
+    void (*block_release)(struct bk_Heap*, union bk_Block*);                                 /* ARGS: heap in, block in                                                                       */
+    void (*pre_alloc)(struct bk_Heap**, u64*, u64*, int*);                                   /* ARGS: heap inout, n_bytes inout, alignment inout, zero_mem inout                              */
+    void (*post_alloc)(struct bk_Heap*, u64, u64, int, void*);                               /* ARGS: heap in, n_bytes in, alignment in, zero_mem in, address in                              */
+    void (*pre_free)(struct bk_Heap*, void*);                                                /* ARGS: heap in, address in                                                                     */
 #ifdef BK_MMAP_OVERRIDE
-    void (*post_mmap)(void*, size_t, int, int, int, off_t, void*);                           /* ARGS: addr in, length in, prot in, flags in, fd in, offset in, ret_addr in */
-    void (*post_munmap)(void*, size_t);                                                      /* ARGS: addr in, length in                                                   */
+    void (*pre_mmap)(void**, size_t*, int*, int*, int*, off_t*, void**);                     /* ARGS: addr inout, length inout, prot inout, flags inout, fd inout, offset inout, ret_addr out */
+    void (*post_mmap)(void*, size_t, int, int, int, off_t, void*);                           /* ARGS: addr in, length in, prot in, flags in, fd in, offset in, ret_addr in                    */
+    void (*post_munmap)(void*, size_t);                                                      /* ARGS: addr in, length in                                                                      */
 #endif
     int  unhooked;
 } bk_Hooks;
@@ -2413,6 +2414,7 @@ do {                                                                            
     INSTALL_HOOK(post_alloc);
     INSTALL_HOOK(pre_free);
 #ifdef BK_MMAP_OVERRIDE
+    INSTALL_HOOK(pre_mmap);
     INSTALL_HOOK(post_mmap);
     INSTALL_HOOK(post_munmap);
 #endif
@@ -3993,10 +3995,22 @@ size_t malloc_usable_size(void *addr) BK_THROW                                  
 
 #ifdef BK_MMAP_OVERRIDE
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
-    long  ret;
     void *ret_addr;
+    long  ret;
 
     if (!_bk_internal_mmap) { BK_STORE_RA(); }
+
+    ret_addr = NULL;
+
+    if (!_bk_internal_mmap) {
+        BK_HOOK(pre_mmap, &addr, &length, &prot, &flags, &fd, &offset, &ret_addr);
+
+        /* Let a pre_mmap hook provide their own result. They might have simply changed
+         * the arguments. In that case proceed as we would normally. */
+        if (ret_addr != NULL) {
+            return ret_addr;
+        }
+    }
 
     ret      = syscall(SYS_mmap, addr, length, prot, flags, fd, offset);
     ret_addr = (void*)ret;
