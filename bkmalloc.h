@@ -3452,7 +3452,7 @@ out:;
 BK_ALWAYS_INLINE
 static inline int bk_mem_is_zero(bk_Block *block, void *mem) {
     if ((u8*)mem >= (u8*)block->meta.bump_base) {
-        return 1;
+        return block->meta.zero;
     } else if ((u8*)mem >= block->_slot_space) {
         /* No guarantees for slots. */
     } else if ((u8*)mem >= block->_chunk_space) {
