@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 ### DEBUG
-#     FP="-fno-omit-frame-pointer" # enable for profiling/debugging
+#     FP="-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer" # enable for profiling/debugging
 #     BK_DEBUG="-DBK_DEBUG"
-#     DEBUG="-g ${FP} -DBK_DEBUG"
+#     DEBUG="-g ${FP} -DBK_DEBUG -Wall -Werror"
 
 ### OPT
     LTO="-flto"
@@ -22,7 +22,7 @@
     FEATURES="${MMAP_OVERRIDE} ${RETURN_ADDR} ${ASSERT}"
 
 WARN_FLAGS="-Wall -Wextra -Werror -Wno-missing-field-initializers -Wno-unused-parameter -Wno-unused-function -Wno-unused-value"
-MAX_ERRS="-fmax-errors=3"
+# MAX_ERRS="-fmax-errors=3"
 TLS_MODEL="-ftls-model=initial-exec"
 C_FLAGS="-fPIC ${TLS_MODEL} ${DEBUG} ${OPT} ${WARN_FLAGS} ${MAX_ERRS} ${FEATURES} -ldl"
 CPP_FLAGS="-fno-rtti ${C_FLAGS}"

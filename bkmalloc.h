@@ -762,21 +762,21 @@ BK_ALWAYS_INLINE static inline void bk_spin_unlock(bk_Spinlock *spin) {
 
 /******************************* @@printf *******************************/
 
-#define BK_PR_RESET      "\e[0m"
-#define BK_PR_FG_BLACK   "\e[30m"
-#define BK_PR_FG_BLUE    "\e[34m"
-#define BK_PR_FG_GREEN   "\e[32m"
-#define BK_PR_FG_CYAN    "\e[36m"
-#define BK_PR_FG_RED     "\e[31m"
-#define BK_PR_FG_YELLOW  "\e[33m"
-#define BK_PR_FG_MAGENTA "\e[35m"
-#define BK_PR_BG_BLACK   "\e[40m"
-#define BK_PR_BG_BLUE    "\e[44m"
-#define BK_PR_BG_GREEN   "\e[42m"
-#define BK_PR_BG_CYAN    "\e[46m"
-#define BK_PR_BG_RED     "\e[41m"
-#define BK_PR_BG_YELLOW  "\e[43m"
-#define BK_PR_BG_MAGENTA "\e[45m"
+#define BK_PR_RESET      "\033[0m"
+#define BK_PR_FG_BLACK   "\033[30m"
+#define BK_PR_FG_BLUE    "\033[34m"
+#define BK_PR_FG_GREEN   "\033[32m"
+#define BK_PR_FG_CYAN    "\033[36m"
+#define BK_PR_FG_RED     "\033[31m"
+#define BK_PR_FG_YELLOW  "\033[33m"
+#define BK_PR_FG_MAGENTA "\033[35m"
+#define BK_PR_BG_BLACK   "\033[40m"
+#define BK_PR_BG_BLUE    "\033[44m"
+#define BK_PR_BG_GREEN   "\033[42m"
+#define BK_PR_BG_CYAN    "\033[46m"
+#define BK_PR_BG_RED     "\033[41m"
+#define BK_PR_BG_YELLOW  "\033[43m"
+#define BK_PR_BG_MAGENTA "\033[45m"
 
 #define BK_PUTC(fd, _c)    \
 do {                       \
@@ -2014,6 +2014,8 @@ typedef struct {
     u32         disable_block_reuse;
     u32         trim_reuse_blocks;
     s32         max_reuse_list_size_MB;
+    u32         move_block_to_head_on_alloc;
+    u32         move_block_to_head_on_free;
 /* GARBAGE COLLECTION */
     const char *_gc_policy;
     u32         gc_policy;
@@ -2262,6 +2264,14 @@ static int bk_init_config(void) {
                                                  "If a block is selected for reuse, but is larger than the request, decommit unneeded pages.",
                                                  &bk_config.trim_reuse_blocks);
                                                  bk_opt_default_bool("trim-reuse-blocks", 1);
+    bk_option("move-block-to-head-on-alloc",     BK_OPT_BOOL, BK_OPT_BLOCKS,
+                                                 "Move block to size class head on alloc.",
+                                                 &bk_config.move_block_to_head_on_alloc);
+                                                 bk_opt_default_bool("move-block-to-head-on-alloc", 1);
+    bk_option("move-block-to-head-on-free",      BK_OPT_BOOL, BK_OPT_BLOCKS,
+                                                 "Move block to size class head on free.",
+                                                 &bk_config.move_block_to_head_on_free);
+                                                 bk_opt_default_bool("move-block-to-head-on-free", 0);
 /* GARBAGE COLLECTION */
     bk_option("gc-policy",                       BK_OPT_STRING, BK_OPT_GARBAGE_COLLECTION,
                                                  "When and how to perform garbage collection on blocks.",
@@ -2353,6 +2363,7 @@ typedef struct {
 #ifdef BK_MMAP_OVERRIDE
     void (*pre_mmap)(void**, size_t*, int*, int*, int*, off_t*, void**);                     /* ARGS: addr inout, length inout, prot inout, flags inout, fd inout, offset inout, ret_addr out */
     void (*post_mmap)(void*, size_t, int, int, int, off_t, void*);                           /* ARGS: addr in, length in, prot in, flags in, fd in, offset in, ret_addr in                    */
+    void (*pre_munmap)(void*, size_t);                                                       /* ARGS: addr in, length in, ret out                                                             */
     void (*post_munmap)(void*, size_t);                                                      /* ARGS: addr in, length in                                                                      */
 #endif
     int  unhooked;
@@ -2416,6 +2427,7 @@ do {                                                                            
 #ifdef BK_MMAP_OVERRIDE
     INSTALL_HOOK(pre_mmap);
     INSTALL_HOOK(post_mmap);
+    INSTALL_HOOK(pre_munmap);
     INSTALL_HOOK(post_munmap);
 #endif
 
@@ -2536,6 +2548,7 @@ typedef struct BK_PACKED {
     struct bk_Heap *heap;
     void           *end;
     u64             size;
+    union bk_Block *prev;
     union bk_Block *next;
     u32             size_class;
     u32             log2_size_class;
@@ -2548,7 +2561,7 @@ typedef struct BK_PACKED {
     u32             zero;
     u32             from_calloc;
     u32             reuse_passes;
-    u8              _pad1[4];
+    u8              _pad1[28];
 } bk_Block_Metadata;
 
 #define BK_CHUNK_SPACE ((2 * BK_MAX_BLOCK_ALLOC_SIZE) - sizeof(bk_Block_Metadata) - sizeof(bk_Slots))
@@ -2863,40 +2876,43 @@ static inline void bk_free_heap(bk_Heap *heap) {
 BK_ALWAYS_INLINE
 static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 size, int zero_mem) {
     bk_Block *block;
-    bk_Block *prev;
     bk_Block *best_fit;
-    bk_Block *best_fit_prev;
     bk_Block *next;
     u64       reuse_size;
 
     bk_spin_lock(&heap->reuse_list_lock);
 
-    block         = heap->reuse_list;
-    prev          = NULL;
-    best_fit      = NULL;
-    best_fit_prev = NULL;
+    block    = heap->reuse_list;
+    best_fit = NULL;
 
     while (block != NULL) {
         if (block->meta.size >= size) {
             if (best_fit == NULL
             ||  block->meta.size < best_fit->meta.size) {
                 best_fit      = block;
-                best_fit_prev = prev;
 
                 if (block->meta.size == size) { break; }
             }
         }
 
-        prev  = block;
         block = block->meta.next;
     }
 
     if (best_fit != NULL) {
-        if (best_fit_prev == NULL) {
+        if (best_fit->meta.prev == NULL) {
+            BK_ASSERT(best_fit == heap->reuse_list, "bad list head");
             heap->reuse_list = best_fit->meta.next;
+            if (heap->reuse_list != NULL) {
+                heap->reuse_list->meta.prev = NULL;
+            }
         } else {
-            best_fit_prev->meta.next = best_fit->meta.next;
+            if (best_fit->meta.next != NULL) {
+                best_fit->meta.next->meta.prev = best_fit->meta.prev;
+            }
+            best_fit->meta.prev->meta.next = best_fit->meta.next;
         }
+        best_fit->meta.prev = best_fit->meta.next = NULL;
+
         heap->reuse_list_len  -= 1;
         heap->reuse_list_size -= best_fit->meta.size;
 
@@ -2910,7 +2926,6 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
         BK_ASSERT(bk_verify_reuse_list(heap), "bad reuse list");
 
         block = heap->reuse_list;
-        prev  = NULL;
 
         while (block != NULL) {
             next = block->meta.next;
@@ -2919,11 +2934,18 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
 
             if (bk_config.gc_policy) {
                 if (block->meta.reuse_passes == (u32)bk_config.gc_release_reuse_after_passes) {
-                    if (prev == NULL) {
-                        heap->reuse_list = next;
+                    if (block->meta.prev != NULL) {
+                        block->meta.prev->meta.next = block->meta.next;
                     } else {
-                        prev->meta.next = next;
+                        BK_ASSERT(block == heap->reuse_list, "bad list head");
+                        heap->reuse_list = block->meta.next;
                     }
+                    if (block->meta.next != NULL) {
+                        block->meta.next->meta.prev = block->meta.prev;
+                    }
+
+                    block->meta.prev = block->meta.next = NULL;
+
                     heap->reuse_list_len  -= 1;
                     heap->reuse_list_size -= block->meta.size;
 
@@ -2937,8 +2959,6 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
                     bk_reuse_list_bytes -= reuse_size;
 
                     bk_spin_unlock(&bk_reuse_list_bytes_lock);
-
-                    block = prev;
                 } else if (block->meta.reuse_passes == (u32)bk_config.gc_decommit_reuse_after_passes && !block->meta.zero) {
                     if (bk_config.log_gc) {
                         if (block->meta.size_class == BK_BIG_ALLOC_SIZE_CLASS) {
@@ -2953,7 +2973,6 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
                 }
             }
 
-            prev  = block;
             block = next;
         }
 
@@ -2964,7 +2983,7 @@ static inline bk_Block * bk_get_block(bk_Heap *heap, u32 size_class_idx, u64 siz
 
         if (zero_mem && !best_fit->meta.zero) {
             bk_decommit_pages((void*)((u8*)best_fit + PAGE_SIZE), (best_fit->meta.size - PAGE_SIZE) / PAGE_SIZE);
-        } else if (bk_config.trim_reuse_blocks && best_fit->meta.size != size) {
+        } else if (bk_config.trim_reuse_blocks && best_fit->meta.size != size && best_fit->meta.size - size >= PAGE_SIZE) {
             bk_decommit_pages((void*)((u8*)best_fit + size), (best_fit->meta.size - size) / PAGE_SIZE);
         }
 
@@ -2999,7 +3018,13 @@ static inline bk_Block * bk_add_block(bk_Heap *heap, u32 size_class_idx) {
 
     block = bk_get_block(heap, size_class_idx, BK_BLOCK_SIZE, 0);
 
-    block->meta.next                  = heap->block_lists[size_class_idx];
+    block->meta.prev = block->meta.next = NULL;
+
+    if (heap->block_lists[size_class_idx] != NULL) {
+        block->meta.next                             = heap->block_lists[size_class_idx];
+        heap->block_lists[size_class_idx]->meta.prev = block;
+    }
+
     heap->block_lists[size_class_idx] = block;
 
     return block;
@@ -3008,7 +3033,6 @@ static inline bk_Block * bk_add_block(bk_Heap *heap, u32 size_class_idx) {
 static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
     u32       idx;
     bk_Block *b;
-    bk_Block *prev;
     int       on_reuse;
 
     idx = block->meta.size_class_idx;
@@ -3017,18 +3041,17 @@ static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
         BK_ASSERT(heap->block_list_locks[idx].val == BK_SPIN_LOCKED,
                 "lock not held");
 
-        if (heap->block_lists[idx] == block) {
-            heap->block_lists[idx] = block->meta.next;
+        if (block->meta.prev != NULL) {
+            block->meta.prev->meta.next = block->meta.next;
         } else {
-            b = heap->block_lists[idx];
-            while (b->meta.next != NULL) {
-                if (b->meta.next == block) {
-                    b->meta.next = block->meta.next;
-                    break;
-                }
-                b = b->meta.next;
-            }
+            BK_ASSERT(block == heap->block_lists[idx], "bad list head");
+            heap->block_lists[idx] = block->meta.next;
         }
+        if (block->meta.next != NULL) {
+            block->meta.next->meta.prev = block->meta.prev;
+        }
+
+        block->meta.prev = block->meta.next = NULL;
     }
 
     if (bk_config.disable_block_reuse) {
@@ -3044,7 +3067,6 @@ static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
         } else {
             block->meta.zero = 0;
         }
-
 
         on_reuse = 0;
 
@@ -3062,18 +3084,22 @@ static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
             BK_ASSERT(heap->reuse_list_size <= MB(bk_config.max_reuse_list_size_MB),
                       "probable underflow of heap->reuse_list_size");
 
-            b    = heap->reuse_list;
-            prev = NULL;
+            b = heap->reuse_list;
             while (b->meta.next != NULL) {
-                prev = b;
-                b    = b->meta.next;
+                b = b->meta.next;
             }
 
-            if (prev == NULL) {
-                heap->reuse_list = NULL;
+            if (b->meta.prev != NULL) {
+                b->meta.prev->meta.next = b->meta.next;
             } else {
-                prev->meta.next = NULL;
+                BK_ASSERT(b == heap->reuse_list, "bad list head");
+                heap->reuse_list = b->meta.next;
             }
+            if (b->meta.next != NULL) {
+                b->meta.next->meta.prev = b->meta.prev;
+            }
+
+            b->meta.prev = b->meta.next = NULL;
 
             heap->reuse_list_len  -= 1;
             heap->reuse_list_size -= b->meta.size;
@@ -3082,7 +3108,11 @@ static inline void bk_remove_block(bk_Heap *heap, bk_Block *block) {
             bk_release_block(b);
         }
 
-        block->meta.next = heap->reuse_list;
+        block->meta.prev = block->meta.next = NULL;
+        if (heap->reuse_list != NULL) {
+            block->meta.next            = heap->reuse_list;
+            heap->reuse_list->meta.prev = block;
+        }
         heap->reuse_list = block;
 
         heap->reuse_list_len  += 1;
@@ -3410,6 +3440,25 @@ static inline void bk_free_slot(bk_Heap *heap, bk_Block *block, void *addr) {
 }
 
 BK_ALWAYS_INLINE
+static inline void bk_move_to_size_class_head(bk_Heap *heap, bk_Block *block) {
+    BK_ASSERT(heap->block_list_locks[block->meta.size_class_idx].val == BK_SPIN_LOCKED,
+              "block list lock is not held");
+
+    if (block != heap->block_lists[block->meta.size_class_idx]) {
+        BK_ASSERT(block->meta.prev != NULL, "bad list head");
+        block->meta.prev->meta.next = block->meta.next;
+        if (block->meta.next != NULL) {
+            block->meta.next->meta.prev = block->meta.prev;
+        }
+
+        heap->block_lists[block->meta.size_class_idx]->meta.prev = block;
+        block->meta.prev                                         = NULL;
+        block->meta.next                                         = heap->block_lists[block->meta.size_class_idx];
+        heap->block_lists[block->meta.size_class_idx]            = block;
+    }
+}
+
+BK_ALWAYS_INLINE
 static inline void * bk_alloc_from_block(bk_Heap *heap, bk_Block *block, u64 n_bytes, u64 alignment) {
     void     *mem;
     bk_Chunk *chunk;
@@ -3530,6 +3579,9 @@ again:;
     mem   = bk_alloc_from_block(heap, block, n_bytes, alignment);
 
 out_unlock:;
+    if (bk_config.move_block_to_head_on_alloc) {
+        bk_move_to_size_class_head(heap, block);
+    }
     bk_spin_unlock(&heap->block_list_locks[size_class_idx]);
 
 out:;
@@ -3560,11 +3612,13 @@ out:;
 BK_ALWAYS_INLINE BK_HOT
 static inline void bk_heap_free(bk_Heap *heap, void *addr) {
     bk_Block *block;
+    int       locked;
     u32       fc;
 
     BK_HOOK(pre_free, heap, addr);
 
-    block = BK_ADDR_PARENT_BLOCK(addr);
+    block  = BK_ADDR_PARENT_BLOCK(addr);
+    locked = 0;
 
     if (unlikely(block->meta.size_class_idx == BK_BIG_ALLOC_SIZE_CLASS_IDX)) {
         bk_big_free(heap, block, addr);
@@ -3581,9 +3635,22 @@ static inline void bk_heap_free(bk_Heap *heap, void *addr) {
         } else if (addr < (void*)&block->slots) {
             bk_free_chunk(heap, block, BK_CHUNK_FROM_USER_MEM(addr));
         } else {
-            bk_spin_lock(&heap->block_list_locks[block->meta.size_class_idx]);
+            bk_spin_lock(&heap->block_list_locks[block->meta.size_class_idx]); /* unlocked below */
+            locked = 1;
             bk_free_slot(heap, block, addr);
+        }
+
+        if (bk_config.move_block_to_head_on_free) {
+            if (!locked) {
+                bk_spin_lock(&heap->block_list_locks[block->meta.size_class_idx]); /* unlocked below */
+                locked = 1;
+            }
+            bk_move_to_size_class_head(heap, block);
+        }
+
+        if (locked) {
             bk_spin_unlock(&heap->block_list_locks[block->meta.size_class_idx]);
+            locked = 0;
         }
 
 
@@ -4025,6 +4092,10 @@ post:;
 
 int munmap(void *addr, size_t length) {
     long ret;
+
+    if (!_bk_internal_munmap) {
+        BK_HOOK(pre_munmap, addr, length);
+    }
 
     ret = syscall(SYS_munmap, addr, length);
 
